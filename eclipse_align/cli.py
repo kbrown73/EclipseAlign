@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
@@ -137,6 +138,78 @@ def write_metadata(path: str | Path, document: dict) -> None:
         handle.write("\n")
 
 
+def frame_index_by_segment(detections: list[FrameDetection]) -> dict[int, tuple[int, int, str, str]]:
+    ranges: dict[int, list] = {}
+    for idx, detection in enumerate(detections):
+        if detection.segment_id not in ranges:
+            ranges[detection.segment_id] = [idx, idx, detection.filename, detection.filename]
+        else:
+            ranges[detection.segment_id][1] = idx
+            ranges[detection.segment_id][3] = detection.filename
+    return {segment_id: tuple(values) for segment_id, values in ranges.items()}
+
+
+def write_rotation_summary(
+    path: str | Path,
+    detections: list[FrameDetection],
+    rotation_boundaries: list,
+) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    segments = frame_index_by_segment(detections)
+    fieldnames = [
+        "boundary_index",
+        "from_segment",
+        "to_segment",
+        "before_frame_index",
+        "after_frame_index",
+        "before_filename",
+        "after_filename",
+        "delta_deg",
+        "cumulative_rotation_deg",
+        "confidence",
+        "source",
+        "score",
+        "from_drift_angle_deg",
+        "to_drift_angle_deg",
+        "raw_drift_delta_deg",
+        "expected_drift_delta_deg",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for boundary in rotation_boundaries:
+            before_segment = segments.get(boundary.from_segment)
+            after_segment = segments.get(boundary.to_segment)
+            after_detection = detections[after_segment[0]] if after_segment is not None else None
+            writer.writerow(
+                {
+                    "boundary_index": boundary.boundary_index,
+                    "from_segment": boundary.from_segment,
+                    "to_segment": boundary.to_segment,
+                    "before_frame_index": before_segment[1] if before_segment is not None else "",
+                    "after_frame_index": after_segment[0] if after_segment is not None else "",
+                    "before_filename": before_segment[3] if before_segment is not None else "",
+                    "after_filename": after_segment[2] if after_segment is not None else "",
+                    "delta_deg": boundary.delta_deg,
+                    "cumulative_rotation_deg": (
+                        after_detection.rotation_deg if after_detection is not None else ""
+                    ),
+                    "confidence": boundary.confidence,
+                    "source": boundary.source,
+                    "score": boundary.score,
+                    "from_drift_angle_deg": none_as_empty(boundary.from_drift_angle_deg),
+                    "to_drift_angle_deg": none_as_empty(boundary.to_drift_angle_deg),
+                    "raw_drift_delta_deg": none_as_empty(boundary.raw_drift_delta_deg),
+                    "expected_drift_delta_deg": none_as_empty(boundary.expected_drift_delta_deg),
+                }
+            )
+
+
+def none_as_empty(value):
+    return "" if value is None else value
+
+
 def summarize(detections: Iterable[FrameDetection]) -> str:
     counts = Counter(d.status for d in detections)
     parts = [f"{name}={counts[name]}" for name in sorted(counts)]
@@ -179,6 +252,8 @@ def detect_command(args: argparse.Namespace) -> int:
     document["common_radius"] = common_radius
     document["rotation_boundaries"] = [boundary.__dict__ for boundary in rotation_boundaries]
     write_metadata(args.metadata, document)
+    if rotation_boundaries:
+        write_rotation_summary(Path(args.metadata).with_name("rotation_summary.csv"), detections, rotation_boundaries)
 
     if args.previews:
         write_previews(inputs, detections, Path(args.previews), config, args.preview_max_dim, jobs)
@@ -248,6 +323,7 @@ def process_command(args: argparse.Namespace) -> int:
 
     diagnostics_dir = Path(args.diagnostics)
     metadata_path = diagnostics_dir / "detections.json"
+    rotation_summary_path = diagnostics_dir / "rotation_summary.csv"
     previews_dir = diagnostics_dir / "previews"
 
     detections = parallel_map_ordered(
@@ -276,6 +352,8 @@ def process_command(args: argparse.Namespace) -> int:
     document["common_radius"] = common_radius
     document["rotation_boundaries"] = [boundary.__dict__ for boundary in rotation_boundaries]
     write_metadata(metadata_path, document)
+    if rotation_boundaries:
+        write_rotation_summary(rotation_summary_path, detections, rotation_boundaries)
 
     write_previews(inputs, detections, previews_dir, config, args.preview_max_dim, jobs)
 
@@ -294,6 +372,8 @@ def process_command(args: argparse.Namespace) -> int:
     print(f"Detected {len(detections)} frames: {summarize(detections)}")
     print(f"Rendered {rendered} frames to {output_dir}")
     print(f"Metadata: {metadata_path}")
+    if rotation_boundaries:
+        print(f"Rotation summary: {rotation_summary_path}")
     print(f"Previews: {previews_dir}")
     if common_radius is not None:
         print(f"Common radius estimate: {common_radius:.2f}px")

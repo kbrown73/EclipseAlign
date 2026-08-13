@@ -7,6 +7,8 @@ assembly.
 
 The tool preserves the original input frames. Frames with clipped or uncertain
 detections are still tracked in metadata and diagnostics so they can be reviewed.
+When rotation detection is enabled, `diagnostics/rotation_summary.csv` records
+one graphable row per reframe boundary.
 
 ## Requirements
 

@@ -1,8 +1,10 @@
 import numpy as np
 
+from eclipse_align.cli import write_rotation_summary
 from eclipse_align.models import FrameDetection
 from eclipse_align.render import rotate_image_around_center
 from eclipse_align.rotation import (
+    BoundaryRotation,
     RotationConfig,
     assign_segments,
     detect_reframe_boundaries,
@@ -146,3 +148,35 @@ def test_estimate_rotations_from_temporary_drift_angle_jump():
         -10.0,
         0.0,
     ]
+
+
+def test_write_rotation_summary_csv(tmp_path):
+    detections = synthetic_drift_detections([10.0, 12.0], frames_per_segment=3)
+    assign_segments(detections, [3])
+    for detection in detections[3:]:
+        detection.rotation_deg = 2.5
+        detection.rotation_confidence = 0.75
+        detection.rotation_source = "registration"
+    boundary = BoundaryRotation(
+        boundary_index=3,
+        from_segment=0,
+        to_segment=1,
+        delta_deg=2.5,
+        confidence=0.75,
+        score=0.9,
+        source="registration",
+        from_drift_angle_deg=10.0,
+        to_drift_angle_deg=12.0,
+        raw_drift_delta_deg=2.0,
+        expected_drift_delta_deg=0.0,
+    )
+
+    path = tmp_path / "rotation_summary.csv"
+    write_rotation_summary(path, detections, [boundary])
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("boundary_index,from_segment,to_segment")
+    assert "0_2.exr" in lines[1]
+    assert "1_0.exr" in lines[1]
+    assert "2.5" in lines[1]
+    assert "registration" in lines[1]

@@ -103,6 +103,7 @@ Main outputs:
 - Aligned EXR frames in the output directory.
 - Detection metadata as JSON.
 - Diagnostic preview images.
+- Rotation summary CSV when rotation detection is enabled.
 
 Optional outputs:
 
@@ -114,6 +115,7 @@ Output filenames should preserve the original stem where possible:
 ```text
 aligned/IMG_8480.exr
 diagnostics/previews/IMG_8480.png
+diagnostics/rotation_summary.csv
 ```
 
 ## Detection Pipeline
@@ -378,7 +380,8 @@ Diagnostics should include:
 - Segment boundary list.
 - Estimated boundary delta angles.
 - Per-segment accumulated rotation.
-- Registration confidence/error score.
+- Confidence, source, and score for each boundary estimate.
+- Graphable CSV rows for boundary delta, cumulative rotation, confidence, source, and drift angles.
 - Optional before/after boundary preview strips.
 
 ### V2 Acceptance Criteria
