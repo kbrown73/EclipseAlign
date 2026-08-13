@@ -15,6 +15,7 @@ from .diagnostics import write_overlay_preview
 from .files import discover_inputs
 from .models import FrameDetection, detection_by_name, metadata_document
 from .render import compute_centered_square_crop, compute_safe_crop, parse_manual_crop, render_frame
+from .rotation import RotationConfig, estimate_rotations
 from .track import refine_detections
 
 
@@ -39,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     render.add_argument("--margin", type=int, default=0, help="extra pixels to keep around centered square crop")
     render.add_argument("--manual-crop", help="explicit crop rectangle as WxH+X+Y")
+    render.add_argument("--no-rotation", action="store_true", help="ignore rotation metadata during render")
 
     process = subparsers.add_parser("process", help="detect and render in one pass")
     add_detection_args(process)
@@ -60,6 +62,14 @@ def add_detection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--work-max-dim", type=int, default=1400, help="max dimension for detection pass")
     parser.add_argument("--threshold", type=float, default=0.18, help="normalized bright mask threshold")
     parser.add_argument("--jobs", type=int, default=1, help="parallel worker processes; use 0 for all CPUs")
+    parser.add_argument("--detect-rotation", action="store_true", help="estimate one roll correction per reframe segment")
+    parser.add_argument("--rotation-jump-threshold", type=float, default=120.0, help="raw center jump threshold for reframe detection")
+    parser.add_argument(
+        "--rotation-jobs",
+        type=int,
+        default=None,
+        help="parallel worker processes for rotation estimation; defaults to --jobs",
+    )
     parser.add_argument(
         "--preview-max-dim",
         type=int,
@@ -80,6 +90,14 @@ def resolve_jobs(value: int) -> int:
     return value
 
 
+def resolve_rotation_jobs(args: argparse.Namespace) -> int:
+    if args.rotation_jobs is not None:
+        return resolve_jobs(args.rotation_jobs)
+    # Boundary registration reads two full EXRs per task. Keep the default
+    # conservative even when detection uses --jobs 0.
+    return min(resolve_jobs(args.jobs), 4)
+
+
 def parallel_map_ordered(fn, items, *, jobs: int, desc: str):
     if jobs == 1:
         return [fn(item) for item in tqdm(items, desc=desc)]
@@ -97,11 +115,11 @@ def preview_worker(payload: tuple[str, FrameDetection, DetectionConfig, str, int
     write_overlay_preview(input_path, preview_path, detection, config, max_dim=preview_max_dim)
 
 
-def render_worker(payload: tuple[str, str, FrameDetection, object]) -> bool:
-    input_path, output_path, detection, crop = payload
+def render_worker(payload: tuple[str, str, FrameDetection, object, bool]) -> bool:
+    input_path, output_path, detection, crop, apply_rotation = payload
     if detection.translation_x is None or detection.translation_y is None:
         return False
-    render_frame(input_path, output_path, detection, crop=crop)
+    render_frame(input_path, output_path, detection, crop=crop, apply_rotation=apply_rotation)
     return True
 
 
@@ -139,6 +157,19 @@ def detect_command(args: argparse.Namespace) -> int:
         desc="detect",
     )
     common_radius = refine_detections(detections)
+    rotation_boundaries = []
+    if args.detect_rotation:
+        rotation_boundaries = estimate_rotations(
+            inputs,
+            detections,
+            config=RotationConfig(jump_threshold_px=args.rotation_jump_threshold),
+            map_fn=lambda fn, items, desc: parallel_map_ordered(
+                fn,
+                items,
+                jobs=resolve_rotation_jobs(args),
+                desc=desc,
+            ),
+        )
 
     document = metadata_document(
         args.input,
@@ -146,6 +177,7 @@ def detect_command(args: argparse.Namespace) -> int:
         crop=None,
     )
     document["common_radius"] = common_radius
+    document["rotation_boundaries"] = [boundary.__dict__ for boundary in rotation_boundaries]
     write_metadata(args.metadata, document)
 
     if args.previews:
@@ -184,6 +216,7 @@ def render_command(args: argparse.Namespace) -> int:
     _, detections = load_metadata(args.metadata)
     by_name = detection_by_name(detections)
     crop = resolve_crop(args, detections)
+    apply_rotation = not args.no_rotation
     output_dir = Path(args.output)
     skipped = 0
     payloads = []
@@ -192,7 +225,7 @@ def render_command(args: argparse.Namespace) -> int:
         if detection is None or detection.translation_x is None or detection.translation_y is None:
             skipped += 1
             continue
-        payloads.append((str(path), str(output_dir / path.name), detection, crop))
+        payloads.append((str(path), str(output_dir / path.name), detection, crop, apply_rotation))
     rendered = sum(
         1
         for result in parallel_map_ordered(render_worker, payloads, jobs=jobs, desc="render")
@@ -224,17 +257,31 @@ def process_command(args: argparse.Namespace) -> int:
         desc="detect",
     )
     common_radius = refine_detections(detections)
+    rotation_boundaries = []
+    if args.detect_rotation:
+        rotation_boundaries = estimate_rotations(
+            inputs,
+            detections,
+            config=RotationConfig(jump_threshold_px=args.rotation_jump_threshold),
+            map_fn=lambda fn, items, desc: parallel_map_ordered(
+                fn,
+                items,
+                jobs=resolve_rotation_jobs(args),
+                desc=desc,
+            ),
+        )
     crop = resolve_crop(args, detections)
     crop_data = crop.to_dict() if crop is not None else None
     document = metadata_document(args.input, detections, crop=crop_data)
     document["common_radius"] = common_radius
+    document["rotation_boundaries"] = [boundary.__dict__ for boundary in rotation_boundaries]
     write_metadata(metadata_path, document)
 
     write_previews(inputs, detections, previews_dir, config, args.preview_max_dim, jobs)
 
     output_dir = Path(args.output)
     payloads = [
-        (str(path), str(output_dir / path.name), detection, crop)
+        (str(path), str(output_dir / path.name), detection, crop, True)
         for path, detection in zip(inputs, detections)
         if detection.translation_x is not None and detection.translation_y is not None
     ]

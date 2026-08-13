@@ -259,6 +259,127 @@ Diagnostic previews should be downscaled by default so a full run does not creat
 
 Diagnostics should make it possible to quickly inspect whether the alignment inputs are trustworthy before rendering all EXRs.
 
+## V2 Rotation Stabilization
+
+V1 translation alignment exposes roll errors introduced during manual reframing. V2 should correct those roll jumps conservatively.
+
+### V2 Rotation Goals
+
+- Detect manual reframe segments from discontinuities in the raw detected eclipse center track.
+- Estimate one roll correction per segment, not one free rotation per frame.
+- Use image registration around segment boundaries as the primary signal.
+- Rotate rendered frames around the aligned eclipse center.
+- Store rotation metadata so render can be rerun without redetecting.
+- Keep rotation correction opt-in until the diagnostics prove it trustworthy.
+
+### V2 Rotation Non-Goals
+
+- Per-frame rotation jitter correction.
+- Full solar/lunar ephemeris modeling.
+- Reconstructing clipped-frame data after rotation.
+- Depending only on sunspots, which may be sparse, occulted, blurred, or low contrast.
+
+### Rotation Strategy
+
+1. Run the normal detection pass and translation assignment.
+2. Detect reframe boundaries from jumps in raw detected centers between adjacent frames.
+3. Assign a `segment_id` to every frame.
+4. For each boundary, compare one or more frames before and after the boundary:
+   - read EXR frames,
+   - translate each to the common center,
+   - crop a square region around the eclipse,
+   - tone-map/normalize the crop,
+   - apply a circular/eclipse mask,
+   - search a small angle range for the rotation with the best image match.
+5. Accumulate boundary rotations into one absolute `rotation_deg` per segment.
+6. Store per-frame rotation fields in metadata.
+7. During render, apply translation first, then rotate around the target center, then crop.
+
+Primary signal:
+
+- Masked image registration around reframe boundaries.
+- This lets the moon shape, sunspots, limb texture, and surface detail all contribute without requiring explicit feature classification.
+
+Secondary/future signals:
+
+- Sunspot feature matching when two or more reliable spots are visible.
+- Lunar limb fitting to estimate the vector from solar center to lunar center.
+- Manual segment rotation overrides.
+
+### Rotation Metadata
+
+Add these fields per frame:
+
+```json
+{
+  "segment_id": 0,
+  "rotation_deg": 0.0,
+  "rotation_confidence": 1.0,
+  "rotation_source": "registration"
+}
+```
+
+Possible `rotation_source` values:
+
+- `none`
+- `registration`
+- `manual`
+- `estimated`
+
+### Rotation CLI
+
+Rotation detection should be opt-in:
+
+```bash
+python3 -m eclipse_align detect \
+  --input "1-200/darktable_exported/*.exr" \
+  --metadata diagnostics/detections.json \
+  --previews diagnostics/previews \
+  --detect-rotation \
+  --jobs 4
+```
+
+Rendering should apply rotation automatically when metadata contains non-zero `rotation_deg`, unless disabled:
+
+```bash
+python3 -m eclipse_align render \
+  --input "1-200/darktable_exported/*.exr" \
+  --metadata diagnostics/detections.json \
+  --output aligned_rotated \
+  --crop \
+  --margin 80 \
+  --jobs 4
+```
+
+Optional render escape hatch:
+
+```bash
+python3 -m eclipse_align render \
+  --input "1-200/darktable_exported/*.exr" \
+  --metadata diagnostics/detections.json \
+  --output aligned_translation_only \
+  --no-rotation
+```
+
+### Rotation Diagnostics
+
+Diagnostics should include:
+
+- Segment boundary list.
+- Estimated boundary delta angles.
+- Per-segment accumulated rotation.
+- Registration confidence/error score.
+- Optional before/after boundary preview strips.
+
+### V2 Acceptance Criteria
+
+- Metadata contains stable `segment_id` values for all frames.
+- Reframe boundaries correspond to visible manual reframes.
+- Rotation correction is constant within each segment.
+- Rendering with rotation reduces visible roll jumps at segment boundaries.
+- Rendering with `--no-rotation` preserves V1 translation-only behavior.
+- Existing V1 detection, crop, and parallel processing tests continue to pass.
+
 ## Suggested Repository Structure
 
 ```text

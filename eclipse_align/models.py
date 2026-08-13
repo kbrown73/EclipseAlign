@@ -21,6 +21,10 @@ class FrameDetection:
     limb_support_fraction: float | None = None
     circle_residual_median_px: float | None = None
     circle_residual_p90_px: float | None = None
+    segment_id: int = 0
+    rotation_deg: float = 0.0
+    rotation_confidence: float = 0.0
+    rotation_source: str = "none"
 
     @property
     def has_center(self) -> bool:

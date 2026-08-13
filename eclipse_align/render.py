@@ -215,6 +215,26 @@ def crop_with_padding(image: np.ndarray, crop: CropRect) -> np.ndarray:
     return output
 
 
+def rotate_image_around_center(image: np.ndarray, angle_deg: float) -> np.ndarray:
+    if abs(angle_deg) < 1e-9:
+        return image
+    single_channel = image.ndim == 3 and image.shape[2] == 1
+    height, width = image.shape[:2]
+    center = (width / 2.0, height / 2.0)
+    matrix = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
+    rotated = cv2.warpAffine(
+        image,
+        matrix,
+        (width, height),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    if single_channel and rotated.ndim == 2:
+        rotated = rotated[:, :, np.newaxis]
+    return rotated
+
+
 def translate_image(image: np.ndarray, dx: float, dy: float) -> np.ndarray:
     height, width = image.shape[:2]
     matrix = np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
@@ -234,11 +254,14 @@ def render_frame(
     detection: FrameDetection,
     *,
     crop: CropRect | None = None,
+    apply_rotation: bool = True,
 ) -> None:
     if detection.translation_x is None or detection.translation_y is None:
         raise ValueError(f"Frame has no translation: {detection.filename}")
     image = read_exr(input_path)
     aligned = translate_image(image, detection.translation_x, detection.translation_y)
+    if apply_rotation and detection.rotation_confidence >= 0.6:
+        aligned = rotate_image_around_center(aligned, detection.rotation_deg)
     if crop is not None:
         aligned = crop_with_padding(aligned, crop)
     write_exr(output_path, aligned)
