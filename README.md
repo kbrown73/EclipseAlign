@@ -23,7 +23,7 @@ Run commands from this directory with Python 3.12 or newer.
 Process the current Darktable EXR export in one pass:
 
 ```bash
-python3 -m eclipse_align process \
+/usr/bin/python3 -m eclipse_align process \
   --input "1-200/darktable_exported/*.exr" \
   --output aligned \
   --diagnostics diagnostics \
@@ -35,13 +35,13 @@ python3 -m eclipse_align process \
 Use the two-step workflow when tuning detection settings or inspecting metadata:
 
 ```bash
-python3 -m eclipse_align detect \
+/usr/bin/python3 -m eclipse_align detect \
   --input "1-200/darktable_exported/*.exr" \
   --metadata diagnostics/detections.json \
   --previews diagnostics/previews \
   --jobs 4
 
-python3 -m eclipse_align render \
+/usr/bin/python3 -m eclipse_align render \
   --input "1-200/darktable_exported/*.exr" \
   --metadata diagnostics/detections.json \
   --output aligned \
@@ -50,10 +50,13 @@ python3 -m eclipse_align render \
   --jobs 4
 ```
 
-Enable roll correction across manual reframe segments when needed:
+Enable conservative roll correction across manual reframe segments when needed.
+This estimates the drift direction within each reframe segment and corrects
+abrupt drift-angle changes; a texture-focused registration pass checks the
+frames around each reframe boundary and can refine those corrections:
 
 ```bash
-python3 -m eclipse_align process \
+/usr/bin/python3 -m eclipse_align process \
   --input "1-200/darktable_exported/*.exr" \
   --output aligned \
   --diagnostics diagnostics \

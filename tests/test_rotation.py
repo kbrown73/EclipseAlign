@@ -2,7 +2,14 @@ import numpy as np
 
 from eclipse_align.models import FrameDetection
 from eclipse_align.render import rotate_image_around_center
-from eclipse_align.rotation import RotationConfig, assign_segments, detect_reframe_boundaries, initialize_rotation_metadata
+from eclipse_align.rotation import (
+    RotationConfig,
+    assign_segments,
+    detect_reframe_boundaries,
+    estimate_rotations,
+    initialize_rotation_metadata,
+    registration_confidence,
+)
 
 
 def test_detect_reframe_boundaries_from_center_jumps():
@@ -67,3 +74,75 @@ def test_rotation_config_defaults_are_conservative():
     config = RotationConfig()
 
     assert config.min_boundary_confidence >= 0.6
+
+
+def test_registration_confidence_accepts_broad_clear_zero_improvement():
+    confidence = registration_confidence(best_score=0.78, next_score=0.779, zero_score=0.685)
+
+    assert confidence >= RotationConfig().min_boundary_confidence
+
+
+def test_registration_confidence_rejects_tiny_zero_improvement():
+    confidence = registration_confidence(best_score=0.92, next_score=0.919, zero_score=0.909)
+
+    assert confidence < RotationConfig().min_boundary_confidence
+
+
+def synthetic_drift_detections(angles: list[float], frames_per_segment: int = 10) -> list[FrameDetection]:
+    detections = []
+    for segment_id, angle in enumerate(angles):
+        radians = np.radians(angle)
+        origin_x = 1000.0 + segment_id * 5000.0
+        origin_y = 1000.0 + segment_id * 3000.0
+        for offset in range(frames_per_segment):
+            detections.append(
+                FrameDetection(
+                    f"{segment_id}_{offset}.exr",
+                    10000,
+                    10000,
+                    center_x=origin_x + offset * 30.0 * np.cos(radians),
+                    center_y=origin_y + offset * 30.0 * np.sin(radians),
+                    confidence=1.0,
+                    status="ok",
+                )
+            )
+    return detections
+
+
+def drift_rotation_config() -> RotationConfig:
+    return RotationConfig(
+        jump_threshold_px=1000.0,
+        drift_min_points=6,
+        drift_min_distance_px=100.0,
+        drift_jump_threshold_degrees=4.0,
+        registration_fallback=False,
+    )
+
+
+def test_estimate_rotations_from_persistent_drift_angle_jump():
+    detections = synthetic_drift_detections([10.0, 12.0, 24.0, 26.0])
+
+    boundaries = estimate_rotations([], detections, config=drift_rotation_config())
+
+    assert [round(boundary.delta_deg, 1) for boundary in boundaries] == [0.0, -10.0, 0.0]
+    assert [round(detections[idx * 10].rotation_deg, 1) for idx in range(4)] == [
+        0.0,
+        0.0,
+        -10.0,
+        -10.0,
+    ]
+    assert detections[20].rotation_source == "drift"
+
+
+def test_estimate_rotations_from_temporary_drift_angle_jump():
+    detections = synthetic_drift_detections([10.0, 12.0, 24.0, 16.0])
+
+    boundaries = estimate_rotations([], detections, config=drift_rotation_config())
+
+    assert [round(boundary.delta_deg, 1) for boundary in boundaries] == [0.0, -10.0, 10.0]
+    assert [round(detections[idx * 10].rotation_deg, 1) for idx in range(4)] == [
+        0.0,
+        0.0,
+        -10.0,
+        0.0,
+    ]

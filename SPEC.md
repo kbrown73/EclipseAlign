@@ -267,7 +267,8 @@ V1 translation alignment exposes roll errors introduced during manual reframing.
 
 - Detect manual reframe segments from discontinuities in the raw detected eclipse center track.
 - Estimate one roll correction per segment, not one free rotation per frame.
-- Use image registration around segment boundaries as the primary signal.
+- Use drift-angle continuity across reframe segments as the primary signal.
+- Use texture-focused image registration around segment boundaries as a secondary refinement.
 - Rotate rendered frames around the aligned eclipse center.
 - Store rotation metadata so render can be rerun without redetecting.
 - Keep rotation correction opt-in until the diagnostics prove it trustworthy.
@@ -284,24 +285,30 @@ V1 translation alignment exposes roll errors introduced during manual reframing.
 1. Run the normal detection pass and translation assignment.
 2. Detect reframe boundaries from jumps in raw detected centers between adjacent frames.
 3. Assign a `segment_id` to every frame.
-4. For each boundary, compare one or more frames before and after the boundary:
+4. For each segment, robustly fit the raw detected centers over time to estimate the apparent drift vector.
+5. For each boundary, compare adjacent segment drift angles:
+   - tolerate the slow natural change in solar drift angle over the run,
+   - detect abrupt drift-angle discontinuities as roll changes,
+   - accumulate the inverse discontinuity into one absolute `rotation_deg` per segment.
+6. Compare the immediate frames before and after each boundary with a texture-focused registration pass:
    - read EXR frames,
    - translate each to the common center,
    - crop a square region around the eclipse,
    - tone-map/normalize the crop,
-   - apply a circular/eclipse mask,
+   - high-pass filter the crop so sunspots and local texture dominate over the symmetric disk,
+   - apply a circular/eclipse mask around the disk,
    - search a small angle range for the rotation with the best image match.
-5. Accumulate boundary rotations into one absolute `rotation_deg` per segment.
-6. Store per-frame rotation fields in metadata.
-7. During render, apply translation first, then rotate around the target center, then crop.
+7. Store per-frame rotation fields in metadata.
+8. During render, apply translation first, then rotate around the target center, then crop.
 
 Primary signal:
 
-- Masked image registration around reframe boundaries.
-- This lets the moon shape, sunspots, limb texture, and surface detail all contribute without requiring explicit feature classification.
+- Robust drift vectors fitted from the detected center track within each reframe segment.
+- This uses many frames per segment and is less sensitive to crescent symmetry, brightness changes, and boundary-frame clipping than single-pair image matching.
 
-Secondary/future signals:
+Secondary/refinement signals:
 
+- Texture-focused image registration around reframe boundaries.
 - Sunspot feature matching when two or more reliable spots are visible.
 - Lunar limb fitting to estimate the vector from solar center to lunar center.
 - Manual segment rotation overrides.
@@ -315,14 +322,17 @@ Add these fields per frame:
   "segment_id": 0,
   "rotation_deg": 0.0,
   "rotation_confidence": 1.0,
-  "rotation_source": "registration"
+  "rotation_source": "drift"
 }
 ```
 
 Possible `rotation_source` values:
 
 - `none`
+- `drift`
 - `registration`
+- `edge_registration`
+- `silhouette`
 - `manual`
 - `estimated`
 
