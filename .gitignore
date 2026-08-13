@@ -1,2 +1,7 @@
 1-100/
 1-200/
+aligned/
+diagnostics/
+__pycache__/
+.pytest_cache/
+*.pyc
