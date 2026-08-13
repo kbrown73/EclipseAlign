@@ -66,7 +66,9 @@ python3 -m eclipse_align process \
   --input "1-200/darktable_exported/*.exr" \
   --output aligned \
   --diagnostics diagnostics \
-  --crop safe-visible
+  --crop \
+  --margin 80 \
+  --jobs 4
 ```
 
 Two-step workflow, useful while tuning:
@@ -75,13 +77,16 @@ Two-step workflow, useful while tuning:
 python3 -m eclipse_align detect \
   --input "1-200/darktable_exported/*.exr" \
   --metadata diagnostics/detections.json \
-  --previews diagnostics/previews
+  --previews diagnostics/previews \
+  --jobs 4
 
 python3 -m eclipse_align render \
   --input "1-200/darktable_exported/*.exr" \
   --metadata diagnostics/detections.json \
   --output aligned \
-  --crop safe-visible
+  --crop \
+  --margin 80 \
+  --jobs 4
 ```
 
 ## Inputs
@@ -189,6 +194,7 @@ Supported crop behavior:
 - `--crop`: crop to the largest square centered on the alignment target that fits within fully visible `ok` detections.
 - `--crop --margin PIXELS`: expand that centered square by the requested margin on all sides. This can intentionally include translated black borders.
 - `--manual-crop WxH+X+Y`: explicit crop rectangle escape hatch.
+- `--jobs N`: run detection, preview generation, and rendering with N worker processes. `--jobs 1` is the default. `--jobs 0` uses all available CPUs.
 
 The centered square crop is the primary V1 crop behavior. The implementation may still compute internal safe intersections, but the CLI should avoid exposing those implementation details as user-facing modes.
 

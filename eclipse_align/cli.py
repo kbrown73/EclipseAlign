@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
+import os
 from pathlib import Path
 from typing import Iterable
 
@@ -29,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--input", required=True, help="input glob or directory")
     render.add_argument("--metadata", required=True, help="metadata JSON from detect")
     render.add_argument("--output", required=True, help="aligned EXR output directory")
+    render.add_argument("--jobs", type=int, default=1, help="parallel worker processes; use 0 for all CPUs")
     render.add_argument(
         "--crop",
         action="store_true",
@@ -56,6 +59,7 @@ def add_detection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input", required=True, help="input glob or directory")
     parser.add_argument("--work-max-dim", type=int, default=1400, help="max dimension for detection pass")
     parser.add_argument("--threshold", type=float, default=0.18, help="normalized bright mask threshold")
+    parser.add_argument("--jobs", type=int, default=1, help="parallel worker processes; use 0 for all CPUs")
     parser.add_argument(
         "--preview-max-dim",
         type=int,
@@ -66,6 +70,39 @@ def add_detection_args(parser: argparse.ArgumentParser) -> None:
 
 def detection_config(args: argparse.Namespace) -> DetectionConfig:
     return DetectionConfig(work_max_dim=args.work_max_dim, threshold=args.threshold)
+
+
+def resolve_jobs(value: int) -> int:
+    if value < 0:
+        raise SystemExit("--jobs must be zero or greater")
+    if value == 0:
+        return os.cpu_count() or 1
+    return value
+
+
+def parallel_map_ordered(fn, items, *, jobs: int, desc: str):
+    if jobs == 1:
+        return [fn(item) for item in tqdm(items, desc=desc)]
+    with ProcessPoolExecutor(max_workers=jobs) as executor:
+        return list(tqdm(executor.map(fn, items), total=len(items), desc=desc))
+
+
+def detect_worker(payload: tuple[str, DetectionConfig]) -> FrameDetection:
+    path, config = payload
+    return detect_file(path, config)
+
+
+def preview_worker(payload: tuple[str, FrameDetection, DetectionConfig, str, int]) -> None:
+    input_path, detection, config, preview_path, preview_max_dim = payload
+    write_overlay_preview(input_path, preview_path, detection, config, max_dim=preview_max_dim)
+
+
+def render_worker(payload: tuple[str, str, FrameDetection, object]) -> bool:
+    input_path, output_path, detection, crop = payload
+    if detection.translation_x is None or detection.translation_y is None:
+        return False
+    render_frame(input_path, output_path, detection, crop=crop)
+    return True
 
 
 def load_metadata(path: str | Path) -> tuple[dict, list[FrameDetection]]:
@@ -90,13 +127,17 @@ def summarize(detections: Iterable[FrameDetection]) -> str:
 
 def detect_command(args: argparse.Namespace) -> int:
     config = detection_config(args)
+    jobs = resolve_jobs(args.jobs)
     inputs = discover_inputs(args.input)
     if not inputs:
         raise SystemExit(f"No EXR inputs matched: {args.input}")
 
-    detections: list[FrameDetection] = []
-    for path in tqdm(inputs, desc="detect"):
-        detections.append(detect_file(path, config))
+    detections = parallel_map_ordered(
+        detect_worker,
+        [(str(path), config) for path in inputs],
+        jobs=jobs,
+        desc="detect",
+    )
     common_radius = refine_detections(detections)
 
     document = metadata_document(
@@ -108,7 +149,7 @@ def detect_command(args: argparse.Namespace) -> int:
     write_metadata(args.metadata, document)
 
     if args.previews:
-        write_previews(inputs, detections, Path(args.previews), config, args.preview_max_dim)
+        write_previews(inputs, detections, Path(args.previews), config, args.preview_max_dim, jobs)
 
     print(f"Detected {len(detections)} frames: {summarize(detections)}")
     if common_radius is not None:
@@ -135,6 +176,7 @@ def resolve_crop(args: argparse.Namespace, detections: list[FrameDetection]):
 
 
 def render_command(args: argparse.Namespace) -> int:
+    jobs = resolve_jobs(args.jobs)
     inputs = discover_inputs(args.input)
     if not inputs:
         raise SystemExit(f"No EXR inputs matched: {args.input}")
@@ -143,15 +185,19 @@ def render_command(args: argparse.Namespace) -> int:
     by_name = detection_by_name(detections)
     crop = resolve_crop(args, detections)
     output_dir = Path(args.output)
-    rendered = 0
     skipped = 0
-    for path in tqdm(inputs, desc="render"):
+    payloads = []
+    for path in inputs:
         detection = by_name.get(path.name)
         if detection is None or detection.translation_x is None or detection.translation_y is None:
             skipped += 1
             continue
-        render_frame(path, output_dir / path.name, detection, crop=crop)
-        rendered += 1
+        payloads.append((str(path), str(output_dir / path.name), detection, crop))
+    rendered = sum(
+        1
+        for result in parallel_map_ordered(render_worker, payloads, jobs=jobs, desc="render")
+        if result
+    )
     print(f"Rendered {rendered} frames to {output_dir}")
     if skipped:
         print(f"Skipped {skipped} frames without usable metadata")
@@ -162,6 +208,7 @@ def render_command(args: argparse.Namespace) -> int:
 
 def process_command(args: argparse.Namespace) -> int:
     config = detection_config(args)
+    jobs = resolve_jobs(args.jobs)
     inputs = discover_inputs(args.input)
     if not inputs:
         raise SystemExit(f"No EXR inputs matched: {args.input}")
@@ -170,9 +217,12 @@ def process_command(args: argparse.Namespace) -> int:
     metadata_path = diagnostics_dir / "detections.json"
     previews_dir = diagnostics_dir / "previews"
 
-    detections: list[FrameDetection] = []
-    for path in tqdm(inputs, desc="detect"):
-        detections.append(detect_file(path, config))
+    detections = parallel_map_ordered(
+        detect_worker,
+        [(str(path), config) for path in inputs],
+        jobs=jobs,
+        desc="detect",
+    )
     common_radius = refine_detections(detections)
     crop = resolve_crop(args, detections)
     crop_data = crop.to_dict() if crop is not None else None
@@ -180,15 +230,19 @@ def process_command(args: argparse.Namespace) -> int:
     document["common_radius"] = common_radius
     write_metadata(metadata_path, document)
 
-    write_previews(inputs, detections, previews_dir, config, args.preview_max_dim)
+    write_previews(inputs, detections, previews_dir, config, args.preview_max_dim, jobs)
 
     output_dir = Path(args.output)
-    rendered = 0
-    for path, detection in tqdm(list(zip(inputs, detections)), desc="render"):
-        if detection.translation_x is None or detection.translation_y is None:
-            continue
-        render_frame(path, output_dir / path.name, detection, crop=crop)
-        rendered += 1
+    payloads = [
+        (str(path), str(output_dir / path.name), detection, crop)
+        for path, detection in zip(inputs, detections)
+        if detection.translation_x is not None and detection.translation_y is not None
+    ]
+    rendered = sum(
+        1
+        for result in parallel_map_ordered(render_worker, payloads, jobs=jobs, desc="render")
+        if result
+    )
 
     print(f"Detected {len(detections)} frames: {summarize(detections)}")
     print(f"Rendered {rendered} frames to {output_dir}")
@@ -207,15 +261,14 @@ def write_previews(
     previews_dir: Path,
     config: DetectionConfig,
     preview_max_dim: int,
+    jobs: int,
 ) -> None:
-    for path, detection in tqdm(list(zip(inputs, detections)), desc="previews"):
-        write_overlay_preview(
-            path,
-            previews_dir / f"{path.stem}.png",
-            detection,
-            config,
-            max_dim=preview_max_dim,
-        )
+    previews_dir.mkdir(parents=True, exist_ok=True)
+    payloads = [
+        (str(path), detection, config, str(previews_dir / f"{path.stem}.png"), preview_max_dim)
+        for path, detection in zip(inputs, detections)
+    ]
+    parallel_map_ordered(preview_worker, payloads, jobs=jobs, desc="previews")
 
 
 def main(argv: list[str] | None = None) -> int:
