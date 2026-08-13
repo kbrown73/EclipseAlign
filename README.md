@@ -52,6 +52,13 @@ Use the two-step workflow when tuning detection settings or inspecting metadata:
   --jobs 4
 ```
 
+Add `--reformat-output` to `render` or `process` to write continuous sequence
+names like `frame_0001.exr`, `frame_0002.exr`, starting from the first rendered
+frame.
+
+Add `--alpha-circle` to `render` or `process` to add the fitted solar disk as a
+filled white alpha channel in each rendered EXR.
+
 Enable conservative roll correction across manual reframe segments when needed.
 This estimates the drift direction within each reframe segment and corrects
 abrupt drift-angle changes; a texture-focused registration pass checks the
@@ -65,6 +72,20 @@ frames around each reframe boundary and can refine those corrections:
   --crop \
   --margin 80 \
   --detect-rotation \
+  --jobs 4
+```
+
+Optionally apply a bounded post-render residual translation polish pass:
+
+```bash
+/usr/bin/python3 -m eclipse_align process \
+  --input "1-200/darktable_exported/*.exr" \
+  --output aligned \
+  --diagnostics diagnostics \
+  --crop \
+  --margin 80 \
+  --detect-rotation \
+  --polish-alignment \
   --jobs 4
 ```
 

@@ -68,6 +68,14 @@ def fill_missing_centers(detections: list[FrameDetection], common_radius: float 
             detection.flags.append("interpolated")
 
 
+def preserve_raw_centers(detections: list[FrameDetection]) -> None:
+    for detection in detections:
+        if detection.raw_center_x is None:
+            detection.raw_center_x = detection.center_x
+        if detection.raw_center_y is None:
+            detection.raw_center_y = detection.center_y
+
+
 def assign_translations(
     detections: list[FrameDetection],
     *,
@@ -87,5 +95,6 @@ def refine_detections(detections: list[FrameDetection]) -> float | None:
     common_radius = estimate_common_radius(detections)
     flag_radius_outliers(detections, common_radius)
     fill_missing_centers(detections, common_radius)
+    preserve_raw_centers(detections)
     assign_translations(detections)
     return common_radius

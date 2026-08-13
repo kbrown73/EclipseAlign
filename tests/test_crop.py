@@ -1,5 +1,6 @@
 from eclipse_align.models import FrameDetection
 from eclipse_align.render import (
+    add_circle_alpha,
     centered_fixed_square_crop,
     centered_square_crop,
     compute_centered_square_crop,
@@ -135,3 +136,32 @@ def test_crop_with_padding_allows_crop_outside_canvas():
     assert output.shape == (6, 6, 1)
     assert output[0, 0, 0] == 0
     assert output[1:5, 1:5, 0].sum() == 16
+
+
+def test_add_circle_alpha_appends_filled_disk_after_crop():
+    import numpy as np
+
+    image = np.zeros((6, 6, 3), dtype=np.float32)
+    crop = parse_manual_crop("6x6+2+2")
+    detection = FrameDetection("a.exr", 10, 10, radius=2)
+
+    output = add_circle_alpha(image, detection, crop)
+
+    assert output.shape == (6, 6, 4)
+    assert output[3, 3, 3] == 1
+    assert output[0, 0, 3] == 0
+    assert output[:, :, :3].sum() == 0
+
+
+def test_add_circle_alpha_replaces_existing_alpha_channel():
+    import numpy as np
+
+    image = np.zeros((5, 5, 4), dtype=np.float32)
+    image[:, :, 3] = 0.25
+    detection = FrameDetection("a.exr", 5, 5, radius=1)
+
+    output = add_circle_alpha(image, detection)
+
+    assert output.shape == (5, 5, 4)
+    assert output[2, 2, 3] == 1
+    assert output[0, 0, 3] == 0

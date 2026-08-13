@@ -104,6 +104,7 @@ Main outputs:
 - Detection metadata as JSON.
 - Diagnostic preview images.
 - Rotation summary CSV when rotation detection is enabled.
+- Polish summary CSV when alignment polish is enabled.
 
 Optional outputs:
 
@@ -116,6 +117,7 @@ Output filenames should preserve the original stem where possible:
 aligned/IMG_8480.exr
 diagnostics/previews/IMG_8480.png
 diagnostics/rotation_summary.csv
+diagnostics/polish_summary.csv
 ```
 
 ## Detection Pipeline
@@ -167,7 +169,7 @@ For frames with the eclipse touching or crossing an image edge:
 After per-frame detection:
 
 - Estimate a common radius across the sequence from high-confidence frames.
-- Smooth centers over time while preserving real jump discontinuities caused by manual reframing.
+- Preserve raw detected centers in metadata.
 - Detect outliers where a frame deviates strongly from neighboring motion.
 - Fill failed detections from nearby valid detections where possible.
 
@@ -185,6 +187,11 @@ For each frame:
 - Apply translation to the original EXR image data.
 - Fill newly exposed pixels with black.
 - Preserve EXR output.
+- Optional `--reformat-output`: write rendered files as a continuous sequence
+  named `frame_0001.exr`, `frame_0002.exr`, etc., starting from the first
+  successfully renderable frame.
+- Optional `--alpha-circle`: add the fitted solar disk as a filled white alpha
+  channel in final output coordinates after alignment and crop.
 
 V1 alignment is translation-only.
 
@@ -211,6 +218,8 @@ Write JSON metadata with one record per frame:
   "height": 3666,
   "center_x": 2747.0,
   "center_y": 1833.0,
+  "raw_center_x": 2747.4,
+  "raw_center_y": 1832.6,
   "radius": 420.0,
   "confidence": 0.98,
   "status": "ok",
@@ -392,6 +401,21 @@ Diagnostics should include:
 - Rendering with rotation reduces visible roll jumps at segment boundaries.
 - Rendering with `--no-rotation` preserves V1 translation-only behavior.
 - Existing V1 detection, crop, and parallel processing tests continue to pass.
+
+## Alignment Polish
+
+Small residual jitter should be handled after the normal translate/rotate render,
+not by smoothing detected centers before rotation estimation. The optional polish
+pass compares already-aligned frame crops and applies only tightly bounded
+residual translations. It should write graphable diagnostics such as:
+
+```text
+frame_index,filename,segment_id,residual_dx,residual_dy,confidence,score,source
+```
+
+The polish pass must not change detected centers, reframe boundaries, segment
+rotation metadata, or accumulated roll corrections. Rejected corrections should
+be written as zero residuals with a `rejected` source.
 
 ## Suggested Repository Structure
 

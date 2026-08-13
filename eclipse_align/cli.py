@@ -5,6 +5,7 @@ import csv
 import json
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import replace
 import os
 from pathlib import Path
 from typing import Iterable
@@ -15,6 +16,7 @@ from .detect import DetectionConfig, detect_file
 from .diagnostics import write_overlay_preview
 from .files import discover_inputs
 from .models import FrameDetection, detection_by_name, metadata_document
+from .polish import PolishConfig, polish_aligned_outputs
 from .render import compute_centered_square_crop, compute_safe_crop, parse_manual_crop, render_frame
 from .rotation import RotationConfig, estimate_rotations
 from .track import refine_detections
@@ -42,6 +44,17 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--margin", type=int, default=0, help="extra pixels to keep around centered square crop")
     render.add_argument("--manual-crop", help="explicit crop rectangle as WxH+X+Y")
     render.add_argument("--no-rotation", action="store_true", help="ignore rotation metadata during render")
+    render.add_argument(
+        "--reformat-output",
+        action="store_true",
+        help="write rendered frames as frame_0001.exr, frame_0002.exr, ...",
+    )
+    render.add_argument(
+        "--alpha-circle",
+        action="store_true",
+        help="add a filled fitted-sun disk as the output alpha channel",
+    )
+    add_polish_args(render)
 
     process = subparsers.add_parser("process", help="detect and render in one pass")
     add_detection_args(process)
@@ -54,6 +67,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     process.add_argument("--margin", type=int, default=0, help="extra pixels to keep around centered square crop")
     process.add_argument("--manual-crop", help="explicit crop rectangle as WxH+X+Y")
+    process.add_argument(
+        "--reformat-output",
+        action="store_true",
+        help="write rendered frames as frame_0001.exr, frame_0002.exr, ...",
+    )
+    process.add_argument(
+        "--alpha-circle",
+        action="store_true",
+        help="add a filled fitted-sun disk as the output alpha channel",
+    )
+    add_polish_args(process)
 
     return parser
 
@@ -76,6 +100,20 @@ def add_detection_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=1600,
         help="max dimension for diagnostic previews; use 0 for full resolution",
+    )
+
+
+def add_polish_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--polish-alignment",
+        action="store_true",
+        help="apply a bounded post-render residual translation polish pass",
+    )
+    parser.add_argument(
+        "--polish-max-shift",
+        type=float,
+        default=2.0,
+        help="maximum residual polish correction in pixels",
     )
 
 
@@ -116,12 +154,84 @@ def preview_worker(payload: tuple[str, FrameDetection, DetectionConfig, str, int
     write_overlay_preview(input_path, preview_path, detection, config, max_dim=preview_max_dim)
 
 
-def render_worker(payload: tuple[str, str, FrameDetection, object, bool]) -> bool:
-    input_path, output_path, detection, crop, apply_rotation = payload
+def render_worker(payload: tuple[str, str, FrameDetection, object, bool, bool]) -> bool:
+    input_path, output_path, detection, crop, apply_rotation, add_alpha_circle = payload
     if detection.translation_x is None or detection.translation_y is None:
         return False
-    render_frame(input_path, output_path, detection, crop=crop, apply_rotation=apply_rotation)
+    render_frame(
+        input_path,
+        output_path,
+        detection,
+        crop=crop,
+        apply_rotation=apply_rotation,
+        add_alpha_circle=add_alpha_circle,
+    )
     return True
+
+
+def reformatted_output_filename(frame_number: int) -> str:
+    if frame_number < 1:
+        raise ValueError("frame_number must start at 1")
+    return f"frame_{frame_number:04d}.exr"
+
+
+def build_render_payloads(
+    inputs: list[Path],
+    detections_by_name: dict[str, FrameDetection],
+    output_dir: Path,
+    crop: object,
+    apply_rotation: bool,
+    *,
+    reformat_output: bool,
+    add_alpha_circle: bool,
+) -> tuple[list[tuple[str, str, FrameDetection, object, bool, bool]], int, dict[str, str]]:
+    skipped = 0
+    payloads = []
+    output_name_by_source: dict[str, str] = {}
+    frame_number = 1
+    for path in inputs:
+        detection = detections_by_name.get(path.name)
+        if detection is None or detection.translation_x is None or detection.translation_y is None:
+            skipped += 1
+            continue
+        output_name = reformatted_output_filename(frame_number) if reformat_output else path.name
+        frame_number += 1
+        output_name_by_source[path.name] = output_name
+        payloads.append(
+            (
+                str(path),
+                str(output_dir / output_name),
+                detection,
+                crop,
+                apply_rotation,
+                add_alpha_circle,
+            )
+        )
+    return payloads, skipped, output_name_by_source
+
+
+def detections_with_output_filenames(
+    detections: list[FrameDetection],
+    output_name_by_source: dict[str, str],
+) -> list[FrameDetection]:
+    return [
+        replace(detection, filename=output_name_by_source.get(Path(detection.filename).name, detection.filename))
+        for detection in detections
+    ]
+
+
+def maybe_polish_outputs(
+    args: argparse.Namespace,
+    output_dir: Path,
+    detections: list[FrameDetection],
+    summary_path: Path,
+) -> int:
+    if not args.polish_alignment:
+        return 0
+    config = PolishConfig(max_shift_px=args.polish_max_shift)
+    polish_results = polish_aligned_outputs(output_dir, detections, config=config)
+    write_polish_summary(summary_path, polish_results)
+    return sum(1 for result in polish_results if result.source == "phase_correlation")
 
 
 def load_metadata(path: str | Path) -> tuple[dict, list[FrameDetection]]:
@@ -210,6 +320,26 @@ def none_as_empty(value):
     return "" if value is None else value
 
 
+def write_polish_summary(path: str | Path, polish_results: list) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "frame_index",
+        "filename",
+        "segment_id",
+        "residual_dx",
+        "residual_dy",
+        "confidence",
+        "score",
+        "source",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for result in polish_results:
+            writer.writerow(result.__dict__)
+
+
 def summarize(detections: Iterable[FrameDetection]) -> str:
     counts = Counter(d.status for d in detections)
     parts = [f"{name}={counts[name]}" for name in sorted(counts)]
@@ -293,20 +423,30 @@ def render_command(args: argparse.Namespace) -> int:
     crop = resolve_crop(args, detections)
     apply_rotation = not args.no_rotation
     output_dir = Path(args.output)
-    skipped = 0
-    payloads = []
-    for path in inputs:
-        detection = by_name.get(path.name)
-        if detection is None or detection.translation_x is None or detection.translation_y is None:
-            skipped += 1
-            continue
-        payloads.append((str(path), str(output_dir / path.name), detection, crop, apply_rotation))
+    payloads, skipped, output_name_by_source = build_render_payloads(
+        inputs,
+        by_name,
+        output_dir,
+        crop,
+        apply_rotation,
+        reformat_output=args.reformat_output,
+        add_alpha_circle=args.alpha_circle,
+    )
     rendered = sum(
         1
         for result in parallel_map_ordered(render_worker, payloads, jobs=jobs, desc="render")
         if result
     )
     print(f"Rendered {rendered} frames to {output_dir}")
+    polished = maybe_polish_outputs(
+        args,
+        output_dir,
+        detections_with_output_filenames(detections, output_name_by_source),
+        Path(args.metadata).with_name("polish_summary.csv"),
+    )
+    if args.polish_alignment:
+        print(f"Polished {polished} frames")
+        print(f"Polish summary: {Path(args.metadata).with_name('polish_summary.csv')}")
     if skipped:
         print(f"Skipped {skipped} frames without usable metadata")
     if crop is not None:
@@ -324,6 +464,7 @@ def process_command(args: argparse.Namespace) -> int:
     diagnostics_dir = Path(args.diagnostics)
     metadata_path = diagnostics_dir / "detections.json"
     rotation_summary_path = diagnostics_dir / "rotation_summary.csv"
+    polish_summary_path = diagnostics_dir / "polish_summary.csv"
     previews_dir = diagnostics_dir / "previews"
 
     detections = parallel_map_ordered(
@@ -358,22 +499,37 @@ def process_command(args: argparse.Namespace) -> int:
     write_previews(inputs, detections, previews_dir, config, args.preview_max_dim, jobs)
 
     output_dir = Path(args.output)
-    payloads = [
-        (str(path), str(output_dir / path.name), detection, crop, True)
-        for path, detection in zip(inputs, detections)
-        if detection.translation_x is not None and detection.translation_y is not None
-    ]
+    by_name = detection_by_name(detections)
+    payloads, _, output_name_by_source = build_render_payloads(
+        inputs,
+        by_name,
+        output_dir,
+        crop,
+        True,
+        reformat_output=args.reformat_output,
+        add_alpha_circle=args.alpha_circle,
+    )
     rendered = sum(
         1
         for result in parallel_map_ordered(render_worker, payloads, jobs=jobs, desc="render")
         if result
     )
+    polished = maybe_polish_outputs(
+        args,
+        output_dir,
+        detections_with_output_filenames(detections, output_name_by_source),
+        polish_summary_path,
+    )
 
     print(f"Detected {len(detections)} frames: {summarize(detections)}")
     print(f"Rendered {rendered} frames to {output_dir}")
+    if args.polish_alignment:
+        print(f"Polished {polished} frames")
     print(f"Metadata: {metadata_path}")
     if rotation_boundaries:
         print(f"Rotation summary: {rotation_summary_path}")
+    if args.polish_alignment:
+        print(f"Polish summary: {polish_summary_path}")
     print(f"Previews: {previews_dir}")
     if common_radius is not None:
         print(f"Common radius estimate: {common_radius:.2f}px")

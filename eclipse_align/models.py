@@ -12,6 +12,8 @@ class FrameDetection:
     height: int
     center_x: float | None = None
     center_y: float | None = None
+    raw_center_x: float | None = None
+    raw_center_y: float | None = None
     radius: float | None = None
     confidence: float = 0.0
     status: str = "failed"

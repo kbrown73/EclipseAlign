@@ -248,6 +248,52 @@ def translate_image(image: np.ndarray, dx: float, dy: float) -> np.ndarray:
     )
 
 
+def circle_alpha_mask(
+    height: int,
+    width: int,
+    *,
+    center_x: float,
+    center_y: float,
+    radius: float | None,
+    dtype=np.float32,
+) -> np.ndarray:
+    mask = np.zeros((height, width, 1), dtype=dtype)
+    if radius is None or not np.isfinite(radius) or radius <= 0:
+        return mask
+    yy, xx = np.ogrid[:height, :width]
+    distance = np.hypot(xx - center_x, yy - center_y)
+    mask[:, :, 0] = (distance <= radius).astype(dtype)
+    return mask
+
+
+def add_circle_alpha(image: np.ndarray, detection: FrameDetection, crop: CropRect | None = None) -> np.ndarray:
+    if image.ndim == 2:
+        image = image[:, :, np.newaxis]
+    output = np.asarray(image)
+    output_height, output_width = output.shape[:2]
+    source_center_x = detection.width / 2.0
+    source_center_y = detection.height / 2.0
+    if crop is None:
+        center_x = source_center_x
+        center_y = source_center_y
+    else:
+        center_x = source_center_x - crop.left
+        center_y = source_center_y - crop.top
+    alpha = circle_alpha_mask(
+        output_height,
+        output_width,
+        center_x=center_x,
+        center_y=center_y,
+        radius=detection.radius,
+        dtype=output.dtype,
+    )
+    if output.shape[2] >= 4:
+        output = output.copy()
+        output[:, :, 3] = alpha[:, :, 0]
+        return output
+    return np.concatenate([output, alpha], axis=2)
+
+
 def render_frame(
     input_path: str | Path,
     output_path: str | Path,
@@ -255,6 +301,7 @@ def render_frame(
     *,
     crop: CropRect | None = None,
     apply_rotation: bool = True,
+    add_alpha_circle: bool = False,
 ) -> None:
     if detection.translation_x is None or detection.translation_y is None:
         raise ValueError(f"Frame has no translation: {detection.filename}")
@@ -264,4 +311,6 @@ def render_frame(
         aligned = rotate_image_around_center(aligned, detection.rotation_deg)
     if crop is not None:
         aligned = crop_with_padding(aligned, crop)
+    if add_alpha_circle:
+        aligned = add_circle_alpha(aligned, detection, crop)
     write_exr(output_path, aligned)
