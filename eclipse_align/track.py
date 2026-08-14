@@ -5,11 +5,22 @@ import numpy as np
 from .models import FrameDetection
 
 
+MIN_RELIABLE_CONFIDENCE = 0.35
+
+
+def is_reliable_detection(detection: FrameDetection) -> bool:
+    return (
+        detection.has_center
+        and detection.confidence >= MIN_RELIABLE_CONFIDENCE
+        and detection.status in {"ok", "clipped"}
+    )
+
+
 def estimate_common_radius(detections: list[FrameDetection]) -> float | None:
     radii = [
         d.radius
         for d in detections
-        if d.radius is not None and d.confidence >= 0.35 and d.status in {"ok", "clipped"}
+        if d.radius is not None and d.confidence >= MIN_RELIABLE_CONFIDENCE and d.status in {"ok", "clipped"}
     ]
     if not radii:
         return None
@@ -43,7 +54,7 @@ def fill_missing_centers(detections: list[FrameDetection], common_radius: float 
     xs = []
     ys = []
     for idx, detection in enumerate(detections):
-        if detection.has_center and detection.status in {"ok", "clipped", "low_confidence"}:
+        if is_reliable_detection(detection):
             good_indexes.append(idx)
             xs.append(detection.center_x)
             ys.append(detection.center_y)
@@ -56,7 +67,7 @@ def fill_missing_centers(detections: list[FrameDetection], common_radius: float 
     interp_y = np.interp(indexes, good_indexes_array, np.asarray(ys, dtype=np.float64))
 
     for idx, detection in enumerate(detections):
-        if detection.has_center and detection.status != "failed":
+        if is_reliable_detection(detection):
             continue
         detection.center_x = float(interp_x[idx])
         detection.center_y = float(interp_y[idx])
@@ -85,6 +96,8 @@ def assign_translations(
     for detection in detections:
         if not detection.has_center:
             continue
+        if detection.status in {"failed", "low_confidence"}:
+            continue
         tx = target_x if target_x is not None else detection.width / 2.0
         ty = target_y if target_y is not None else detection.height / 2.0
         detection.translation_x = float(tx - detection.center_x)
@@ -94,7 +107,7 @@ def assign_translations(
 def refine_detections(detections: list[FrameDetection]) -> float | None:
     common_radius = estimate_common_radius(detections)
     flag_radius_outliers(detections, common_radius)
-    fill_missing_centers(detections, common_radius)
     preserve_raw_centers(detections)
+    fill_missing_centers(detections, common_radius)
     assign_translations(detections)
     return common_radius

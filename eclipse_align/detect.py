@@ -118,6 +118,19 @@ def least_squares_circle(points: np.ndarray) -> tuple[float, float, float] | Non
     return float(cx), float(cy), float(np.sqrt(radius_sq))
 
 
+def adjusted_circle_confidence(
+    confidence: float,
+    *,
+    residual_median_px: float,
+    limb_support_fraction: float,
+    config: DetectionConfig,
+) -> float:
+    median_quality = config.distorted_limb_median_px / max(residual_median_px, 1e-9)
+    support_quality = limb_support_fraction / max(config.distorted_limb_support_fraction, 1e-9)
+    quality = min(1.0, median_quality, support_quality)
+    return float(max(0.0, min(confidence, quality)))
+
+
 def robust_circle_fit(
     points: np.ndarray,
     config: DetectionConfig,
@@ -221,6 +234,12 @@ def detect_image(
     limb_support_fraction = float(np.mean(residuals <= tolerance))
     residual_median_px = float(np.median(residuals) / scale)
     residual_p90_px = float(np.percentile(residuals, 90) / scale)
+    confidence = adjusted_circle_confidence(
+        confidence,
+        residual_median_px=residual_median_px,
+        limb_support_fraction=limb_support_fraction,
+        config=config,
+    )
 
     cx /= scale
     cy /= scale

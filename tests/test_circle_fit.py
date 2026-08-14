@@ -1,6 +1,6 @@
 import numpy as np
 
-from eclipse_align.detect import DetectionConfig, robust_circle_fit
+from eclipse_align.detect import DetectionConfig, adjusted_circle_confidence, robust_circle_fit
 
 
 def test_robust_circle_fit_recovers_circle_with_outliers():
@@ -17,3 +17,25 @@ def test_robust_circle_fit_recovers_circle_with_outliers():
     assert abs(cy - 80.0) < 1.0
     assert abs(radius - 40.0) < 1.0
     assert confidence > 0.9
+
+
+def test_adjusted_circle_confidence_rejects_high_residual_fit():
+    confidence = adjusted_circle_confidence(
+        1.0,
+        residual_median_px=46.8,
+        limb_support_fraction=1.0,
+        config=DetectionConfig(),
+    )
+
+    assert confidence < 0.35
+
+
+def test_adjusted_circle_confidence_keeps_clean_supported_fit():
+    confidence = adjusted_circle_confidence(
+        0.82,
+        residual_median_px=1.0,
+        limb_support_fraction=0.9,
+        config=DetectionConfig(),
+    )
+
+    assert confidence == 0.82
