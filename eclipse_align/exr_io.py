@@ -5,42 +5,30 @@ from pathlib import Path
 import numpy as np
 import OpenImageIO as oiio
 
+from astroio.exr import read_exr as read_astroio_exr
+from astroio.exr import write_exr as write_astroio_exr
+
 
 def read_exr(path: str | Path) -> np.ndarray:
-    path = str(path)
-    inp = oiio.ImageInput.open(path)
-    if inp is None:
-        raise RuntimeError(f"Could not open EXR: {path}")
-    try:
-        image = inp.read_image(format=oiio.FLOAT)
-    finally:
-        inp.close()
-    if image is None:
-        raise RuntimeError(f"Could not read EXR pixels: {path}")
+    return as_working_float_frame(read_astroio_exr(path))
+
+
+def as_working_float_frame(image: np.ndarray) -> np.ndarray:
+    image = np.asarray(image)
     if image.ndim == 2:
         image = image[:, :, np.newaxis]
+    if image.ndim != 3:
+        raise ValueError(f"Expected 2D mono or 3D channel image, got shape {image.shape}")
     return np.asarray(image, dtype=np.float32)
 
 
 def write_exr(path: str | Path, image: np.ndarray, *, half: bool = True) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    image = np.asarray(image)
     if image.ndim == 2:
         image = image[:, :, np.newaxis]
-    image = np.asarray(image)
-    height, width, channels = image.shape
-    pixel_type = oiio.HALF if half else oiio.FLOAT
-    spec = oiio.ImageSpec(width, height, channels, pixel_type)
-    out = oiio.ImageOutput.create(str(path))
-    if out is None:
-        raise RuntimeError(f"Could not create EXR output: {path}")
-    try:
-        if not out.open(str(path), spec):
-            raise RuntimeError(f"Could not open EXR output: {path}: {out.geterror()}")
-        if not out.write_image(image.astype(np.float32, copy=False)):
-            raise RuntimeError(f"Could not write EXR output: {path}: {out.geterror()}")
-    finally:
-        out.close()
+    if image.ndim != 3:
+        raise ValueError(f"Expected 2D mono or 3D channel image, got shape {image.shape}")
+    write_astroio_exr(path, image.astype(np.float32, copy=False), half=half)
 
 
 def image_size(path: str | Path) -> tuple[int, int, int]:

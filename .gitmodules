@@ -1,0 +1,3 @@
+[submodule "astroio"]
+	path = astroio
+	url = https://github.com/kbrown73/AstroIO.git

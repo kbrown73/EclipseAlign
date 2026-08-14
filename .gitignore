@@ -5,3 +5,4 @@ diagnostics/
 __pycache__/
 .pytest_cache/
 *.pyc
+jpaana/
