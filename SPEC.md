@@ -105,6 +105,7 @@ Main outputs:
 - Diagnostic preview images.
 - Rotation summary CSV when rotation detection is enabled.
 - Polish summary CSV when alignment polish is enabled.
+- Dust candidate diagnostics when dust detection is enabled.
 
 Optional outputs:
 
@@ -269,6 +270,63 @@ Generate preview images showing:
 Diagnostic previews should be downscaled by default so a full run does not create unnecessarily large PNGs. Full-resolution previews can be supported as an explicit option.
 
 Diagnostics should make it possible to quickly inspect whether the alignment inputs are trustworthy before rendering all EXRs.
+
+## Dust Candidate Diagnostics
+
+Dust bunnies are sensor-fixed dark local-contrast defects. Once frames are
+aligned to the eclipse, they appear to move opposite the drift, while real
+solar-frame details do not remain fixed in raw camera coordinates.
+
+Dust detection should be opt-in and diagnostic-only at first:
+
+```bash
+python3 -m eclipse_align process \
+  --input "1-200/darktable_exported/*.exr" \
+  --output aligned \
+  --diagnostics diagnostics \
+  --detect-dust \
+  --jobs 4
+```
+
+Initial strategy:
+
+1. Read each raw EXR and use the refined detection metadata to mask the inner
+   solar disk in original camera coordinates. The default support region should
+   extend slightly beyond the fitted radius, currently `1.03x`, so dust near the
+   limb can still be detected.
+2. Estimate dark local-contrast residuals by comparing luminance with a heavily
+   blurred local reference.
+3. Reject obvious non-dust structures before aggregation:
+   - ignore a small margin around the camera frame edge,
+   - veto large or elongated high-contrast edge components such as the
+     overlapping moon edge,
+   - keep compact soft blobs so near-limb dust can still be reviewed.
+4. Accumulate per-frame dark residual hits and solar-disk support in camera
+   coordinates.
+5. Keep candidates only when the same camera-coordinate region has repeated
+   support across many frames.
+6. Write aggregate maps, a component CSV, and per-frame candidate overlays.
+
+Initial outputs:
+
+- `diagnostics/dust/dust_summary.csv`
+- `diagnostics/dust/dust_score.png`
+- `diagnostics/dust/dust_mask.png`
+- `diagnostics/dust/dust_support.png`
+- `diagnostics/dust/dust_hits.png`
+- `diagnostics/dust/candidates/*.png`
+
+Initial tuning controls:
+
+- `--dust-disk-radius`: radius fraction to inspect, default `1.03`.
+- `--dust-min-deficit`: per-frame dark local-contrast threshold, default `0.030`.
+- `--dust-min-hit-fraction`: aggregate repeated-hit fraction, default `0.10`.
+- `--dust-min-support-frames`: minimum supported frames, default `6`.
+
+Dust correction remains a later opt-in step. A correction pass should use the
+validated dust mask as a flat-field-like gain correction or a bounded local
+inpaint, and should write before/after diagnostics before modifying rendered
+masters.
 
 ## V2 Rotation Stabilization
 

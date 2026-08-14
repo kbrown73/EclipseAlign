@@ -89,6 +89,41 @@ Optionally apply a bounded post-render residual translation polish pass:
   --jobs 4
 ```
 
+Write sensor-fixed dust candidate diagnostics without changing rendered pixels:
+
+```bash
+/usr/bin/python3 -m eclipse_align process \
+  --input "1-200/darktable_exported/*.exr" \
+  --output aligned \
+  --diagnostics diagnostics \
+  --crop \
+  --margin 80 \
+  --detect-dust \
+  --jobs 4
+```
+
+Dust diagnostics are written to `diagnostics/dust/`:
+
+- `dust_summary.csv`: candidate centers, approximate radii, and support scores.
+- `dust_score.png`: heat map of repeated dark local-contrast hits in camera coordinates.
+- `dust_mask.png`: area-filtered candidate mask.
+- `candidates/*.png`: per-frame candidate overlays for visual inspection.
+
+The default dust pass now inspects out to `1.03x` the fitted solar radius so
+spots near the limb are included. To push detection further while reviewing
+diagnostics, lower the repeated-hit threshold:
+
+```bash
+/usr/bin/python3 -m eclipse_align detect \
+  --input "1-200/darktable_exported/*.exr" \
+  --metadata diagnostics/detections.json \
+  --detect-dust \
+  --dust-min-hit-fraction 0.08 \
+  --dust-min-deficit 0.025 \
+  --previews diagnostics/previews \
+  --jobs 4
+```
+
 Run the tests:
 
 ```bash

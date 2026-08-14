@@ -4,8 +4,9 @@ import argparse
 import csv
 import json
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import replace
+import multiprocessing as mp
 import os
 from pathlib import Path
 from typing import Iterable
@@ -14,6 +15,7 @@ from tqdm import tqdm
 
 from .detect import DetectionConfig, detect_file
 from .diagnostics import write_overlay_preview
+from .dust import DustConfig, DustDetectionResult, analyze_dust_inputs
 from .files import discover_inputs
 from .models import FrameDetection, detection_by_name, metadata_document
 from .polish import PolishConfig, polish_aligned_outputs
@@ -88,6 +90,31 @@ def add_detection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--threshold", type=float, default=0.18, help="normalized bright mask threshold")
     parser.add_argument("--jobs", type=int, default=1, help="parallel worker processes; use 0 for all CPUs")
     parser.add_argument("--detect-rotation", action="store_true", help="estimate one roll correction per reframe segment")
+    parser.add_argument("--detect-dust", action="store_true", help="write sensor-fixed dust candidate diagnostics")
+    parser.add_argument(
+        "--dust-disk-radius",
+        type=float,
+        default=1.03,
+        help="solar radius fraction to inspect for dust diagnostics",
+    )
+    parser.add_argument(
+        "--dust-min-deficit",
+        type=float,
+        default=0.030,
+        help="minimum local dark deficit for per-frame dust candidates",
+    )
+    parser.add_argument(
+        "--dust-min-hit-fraction",
+        type=float,
+        default=0.10,
+        help="minimum repeated-hit fraction for aggregate dust candidates",
+    )
+    parser.add_argument(
+        "--dust-min-support-frames",
+        type=int,
+        default=6,
+        help="minimum supported frames for aggregate dust candidates",
+    )
     parser.add_argument("--rotation-jump-threshold", type=float, default=120.0, help="raw center jump threshold for reframe detection")
     parser.add_argument(
         "--rotation-jobs",
@@ -117,6 +144,24 @@ def add_polish_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def dust_config(args: argparse.Namespace) -> DustConfig:
+    if args.dust_disk_radius <= 0:
+        raise SystemExit("--dust-disk-radius must be greater than zero")
+    if args.dust_min_deficit <= 0:
+        raise SystemExit("--dust-min-deficit must be greater than zero")
+    if not 0 < args.dust_min_hit_fraction <= 1:
+        raise SystemExit("--dust-min-hit-fraction must be greater than zero and no more than one")
+    if args.dust_min_support_frames < 1:
+        raise SystemExit("--dust-min-support-frames must be at least one")
+    return DustConfig(
+        work_max_dim=args.work_max_dim,
+        disk_radius_fraction=args.dust_disk_radius,
+        min_deficit=args.dust_min_deficit,
+        min_hit_fraction=args.dust_min_hit_fraction,
+        min_support_frames=args.dust_min_support_frames,
+    )
+
+
 def detection_config(args: argparse.Namespace) -> DetectionConfig:
     return DetectionConfig(work_max_dim=args.work_max_dim, threshold=args.threshold)
 
@@ -134,14 +179,36 @@ def resolve_rotation_jobs(args: argparse.Namespace) -> int:
         return resolve_jobs(args.rotation_jobs)
     # Boundary registration reads two full EXRs per task. Keep the default
     # conservative even when detection uses --jobs 0.
-    return min(resolve_jobs(args.jobs), 4)
+    return max(1, resolve_jobs(args.jobs) - 2)
+
+
+def resolve_preview_jobs(args: argparse.Namespace) -> int:
+    # Preview generation is I/O and memory heavy because every worker reads a
+    # full EXR and writes a PNG. With --jobs 0, leave a couple of cores free so
+    # the machine remains responsive while still scaling with available CPUs.
+    return max(1, resolve_jobs(args.jobs) - 2)
+
+
+def process_pool_context():
+    return mp.get_context("spawn")
 
 
 def parallel_map_ordered(fn, items, *, jobs: int, desc: str):
     if jobs == 1:
         return [fn(item) for item in tqdm(items, desc=desc)]
-    with ProcessPoolExecutor(max_workers=jobs) as executor:
+    with ProcessPoolExecutor(max_workers=jobs, mp_context=process_pool_context()) as executor:
         return list(tqdm(executor.map(fn, items), total=len(items), desc=desc))
+
+
+def parallel_run_unordered(fn, items, *, jobs: int, desc: str) -> None:
+    if jobs == 1:
+        for item in tqdm(items, desc=desc):
+            fn(item)
+        return
+    with ProcessPoolExecutor(max_workers=jobs, mp_context=process_pool_context()) as executor:
+        futures = [executor.submit(fn, item) for item in items]
+        for future in tqdm(as_completed(futures), total=len(futures), desc=desc):
+            future.result()
 
 
 def detect_worker(payload: tuple[str, DetectionConfig]) -> FrameDetection:
@@ -340,6 +407,16 @@ def write_polish_summary(path: str | Path, polish_results: list) -> None:
             writer.writerow(result.__dict__)
 
 
+def dust_metadata(result: DustDetectionResult) -> dict:
+    return {
+        "frames_used": result.frames_used,
+        "map_width": result.map_width,
+        "map_height": result.map_height,
+        "scale": result.scale,
+        "components": [component.__dict__ for component in result.components],
+    }
+
+
 def summarize(detections: Iterable[FrameDetection]) -> str:
     counts = Counter(d.status for d in detections)
     parts = [f"{name}={counts[name]}" for name in sorted(counts)]
@@ -373,6 +450,15 @@ def detect_command(args: argparse.Namespace) -> int:
                 desc=desc,
             ),
         )
+    dust_result = None
+    if args.detect_dust:
+        dust_result = analyze_dust_inputs(
+            inputs,
+            detections,
+            Path(args.metadata).with_name("dust"),
+            config=dust_config(args),
+            preview_max_dim=args.preview_max_dim,
+        )
 
     document = metadata_document(
         args.input,
@@ -381,16 +467,28 @@ def detect_command(args: argparse.Namespace) -> int:
     )
     document["common_radius"] = common_radius
     document["rotation_boundaries"] = [boundary.__dict__ for boundary in rotation_boundaries]
+    if dust_result is not None:
+        document["dust"] = dust_metadata(dust_result)
     write_metadata(args.metadata, document)
     if rotation_boundaries:
         write_rotation_summary(Path(args.metadata).with_name("rotation_summary.csv"), detections, rotation_boundaries)
 
     if args.previews:
-        write_previews(inputs, detections, Path(args.previews), config, args.preview_max_dim, jobs)
+        write_previews(
+            inputs,
+            detections,
+            Path(args.previews),
+            config,
+            args.preview_max_dim,
+            resolve_preview_jobs(args),
+        )
 
     print(f"Detected {len(detections)} frames: {summarize(detections)}")
     if common_radius is not None:
         print(f"Common radius estimate: {common_radius:.2f}px")
+    if dust_result is not None:
+        print(f"Dust candidates: {len(dust_result.components)}")
+        print(f"Dust diagnostics: {Path(args.metadata).with_name('dust')}")
     return 0
 
 
@@ -465,6 +563,7 @@ def process_command(args: argparse.Namespace) -> int:
     metadata_path = diagnostics_dir / "detections.json"
     rotation_summary_path = diagnostics_dir / "rotation_summary.csv"
     polish_summary_path = diagnostics_dir / "polish_summary.csv"
+    dust_dir = diagnostics_dir / "dust"
     previews_dir = diagnostics_dir / "previews"
 
     detections = parallel_map_ordered(
@@ -487,16 +586,27 @@ def process_command(args: argparse.Namespace) -> int:
                 desc=desc,
             ),
         )
+    dust_result = None
+    if args.detect_dust:
+        dust_result = analyze_dust_inputs(
+            inputs,
+            detections,
+            dust_dir,
+            config=dust_config(args),
+            preview_max_dim=args.preview_max_dim,
+        )
     crop = resolve_crop(args, detections)
     crop_data = crop.to_dict() if crop is not None else None
     document = metadata_document(args.input, detections, crop=crop_data)
     document["common_radius"] = common_radius
     document["rotation_boundaries"] = [boundary.__dict__ for boundary in rotation_boundaries]
+    if dust_result is not None:
+        document["dust"] = dust_metadata(dust_result)
     write_metadata(metadata_path, document)
     if rotation_boundaries:
         write_rotation_summary(rotation_summary_path, detections, rotation_boundaries)
 
-    write_previews(inputs, detections, previews_dir, config, args.preview_max_dim, jobs)
+    write_previews(inputs, detections, previews_dir, config, args.preview_max_dim, resolve_preview_jobs(args))
 
     output_dir = Path(args.output)
     by_name = detection_by_name(detections)
@@ -530,6 +640,9 @@ def process_command(args: argparse.Namespace) -> int:
         print(f"Rotation summary: {rotation_summary_path}")
     if args.polish_alignment:
         print(f"Polish summary: {polish_summary_path}")
+    if dust_result is not None:
+        print(f"Dust candidates: {len(dust_result.components)}")
+        print(f"Dust diagnostics: {dust_dir}")
     print(f"Previews: {previews_dir}")
     if common_radius is not None:
         print(f"Common radius estimate: {common_radius:.2f}px")
@@ -551,7 +664,7 @@ def write_previews(
         (str(path), detection, config, str(previews_dir / f"{path.stem}.png"), preview_max_dim)
         for path, detection in zip(inputs, detections)
     ]
-    parallel_map_ordered(preview_worker, payloads, jobs=jobs, desc="previews")
+    parallel_run_unordered(preview_worker, payloads, jobs=jobs, desc="previews")
 
 
 def main(argv: list[str] | None = None) -> int:
