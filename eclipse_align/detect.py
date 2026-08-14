@@ -132,7 +132,7 @@ def robust_circle_fit(
     rng = np.random.default_rng(config.seed)
     best: tuple[int, float, float, float, np.ndarray] | None = None
     radius_floor = 3.0
-    radius_ceiling = max(points[:, 0].ptp(), points[:, 1].ptp()) * 3.0
+    radius_ceiling = max(np.ptp(points[:, 0]), np.ptp(points[:, 1])) * 3.0
 
     for _ in range(config.ransac_iterations):
         idx = rng.choice(len(points), 3, replace=False)
