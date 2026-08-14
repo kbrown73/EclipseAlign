@@ -1,32 +1,34 @@
 # Solar Eclipse Timelapse Aligner
 
-Command-line tools for aligning OpenEXR solar eclipse timelapse frames. The
-pipeline detects the eclipse center in each frame, writes detection metadata and
-diagnostic previews, and renders aligned EXR masters for later grading or video
-assembly.
+Command-line tools for aligning OpenEXR solar eclipse timelapse frames.
 
-The tool preserves the original input frames. Frames with clipped or uncertain
-detections are still tracked in metadata and diagnostics so they can be reviewed.
-When rotation detection is enabled, `diagnostics/rotation_summary.csv` records
-one graphable row per reframe boundary.
+The pipeline detects the eclipse center in each frame, writes metadata and
+diagnostic previews, then renders aligned EXR masters for later grading or video
+assembly. The original input frames are never modified.
+
+Frames with clipped or uncertain detections are still recorded in the metadata
+and diagnostics so they can be reviewed before rendering.
 
 ## Requirements
 
-On Ubuntu or Linux Mint, install the expected system packages:
+Run commands from this directory with Python 3.12 or newer.
+
+On Ubuntu or Linux Mint, install the expected packages with:
 
 ```bash
 sudo apt install python3-numpy python3-opencv python3-openimageio openimageio-tools openexr python3-pytest python3-tqdm
 ```
 
-Run commands from this directory with Python 3.12 or newer.
+Input frames are expected to be `.exr` files.
 
-## Recommended Commands
+## Quick Start
 
-Process the current Darktable EXR export in one pass:
+For the usual one-pass workflow, detect the eclipse, write diagnostics, crop the
+result, and render aligned frames:
 
 ```bash
 /usr/bin/python3 -m eclipse_align process \
-  --input "1-200/darktable_exported/*.exr" \
+  --input "path/to/*.exr" \
   --output aligned \
   --diagnostics diagnostics \
   --crop \
@@ -34,17 +36,22 @@ Process the current Darktable EXR export in one pass:
   --jobs 4
 ```
 
-Use the two-step workflow when tuning detection settings or inspecting metadata:
+This writes aligned EXR frames to `aligned/` and diagnostics to `diagnostics/`.
+
+## Two-Step Workflow
+
+Use `detect` and `render` separately when tuning detection settings, inspecting
+metadata, or reviewing previews before rendering the final frames:
 
 ```bash
 /usr/bin/python3 -m eclipse_align detect \
-  --input "1-200/darktable_exported/*.exr" \
+  --input "path/to/*.exr" \
   --metadata diagnostics/detections.json \
   --previews diagnostics/previews \
   --jobs 4
 
 /usr/bin/python3 -m eclipse_align render \
-  --input "1-200/darktable_exported/*.exr" \
+  --input "path/to/*.exr" \
   --metadata diagnostics/detections.json \
   --output aligned \
   --crop \
@@ -52,21 +59,24 @@ Use the two-step workflow when tuning detection settings or inspecting metadata:
   --jobs 4
 ```
 
-Add `--reformat-output` to `render` or `process` to write continuous sequence
-names like `frame_0001.exr`, `frame_0002.exr`, starting from the first rendered
-frame.
+## Useful Options
 
-Add `--alpha-circle` to `render` or `process` to add the fitted solar disk as a
-filled white alpha channel in each rendered EXR.
+- Add `--reformat-output` to `render` or `process` to write continuous sequence
+  names such as `frame_0001.exr`, `frame_0002.exr`, starting from the first
+  rendered frame.
+- Add `--alpha-circle` to `render` or `process` to add the fitted solar disk as
+  a filled white alpha channel in each rendered EXR.
 
-Enable conservative roll correction across manual reframe segments when needed.
-This estimates the drift direction within each reframe segment and corrects
-abrupt drift-angle changes; a texture-focused registration pass checks the
-frames around each reframe boundary and can refine those corrections:
+## Rotation Correction
+
+Enable conservative roll correction when the source sequence includes manual
+reframe segments. The tool estimates the drift direction within each segment,
+corrects abrupt drift-angle changes, and uses texture-focused registration
+around each reframe boundary to refine the correction.
 
 ```bash
 /usr/bin/python3 -m eclipse_align process \
-  --input "1-200/darktable_exported/*.exr" \
+  --input "path/to/*.exr" \
   --output aligned \
   --diagnostics diagnostics \
   --crop \
@@ -75,11 +85,16 @@ frames around each reframe boundary and can refine those corrections:
   --jobs 4
 ```
 
-Optionally apply a bounded post-render residual translation polish pass:
+When rotation detection is enabled, `diagnostics/rotation_summary.csv` records
+one graphable row per reframe boundary.
+
+## Alignment Polish
+
+After rendering, you can apply a bounded residual translation polish pass:
 
 ```bash
 /usr/bin/python3 -m eclipse_align process \
-  --input "1-200/darktable_exported/*.exr" \
+  --input "path/to/*.exr" \
   --output aligned \
   --diagnostics diagnostics \
   --crop \
@@ -89,11 +104,13 @@ Optionally apply a bounded post-render residual translation polish pass:
   --jobs 4
 ```
 
+## Dust Diagnostics
+
 Write sensor-fixed dust candidate diagnostics without changing rendered pixels:
 
 ```bash
 /usr/bin/python3 -m eclipse_align process \
-  --input "1-200/darktable_exported/*.exr" \
+  --input "path/to/*.exr" \
   --output aligned \
   --diagnostics diagnostics \
   --crop \
@@ -105,7 +122,8 @@ Write sensor-fixed dust candidate diagnostics without changing rendered pixels:
 Dust diagnostics are written to `diagnostics/dust/`:
 
 - `dust_summary.csv`: candidate centers, approximate radii, and support scores.
-- `dust_score.png`: heat map of repeated dark local-contrast hits in camera coordinates.
+- `dust_score.png`: heat map of repeated dark local-contrast hits in camera
+  coordinates.
 - `dust_mask.png`: area-filtered candidate mask.
 - `candidates/*.png`: per-frame candidate overlays for visual inspection.
 
@@ -115,7 +133,7 @@ diagnostics, lower the repeated-hit threshold:
 
 ```bash
 /usr/bin/python3 -m eclipse_align detect \
-  --input "1-200/darktable_exported/*.exr" \
+  --input "path/to/*.exr" \
   --metadata diagnostics/detections.json \
   --detect-dust \
   --dust-min-hit-fraction 0.08 \
@@ -123,6 +141,8 @@ diagnostics, lower the repeated-hit threshold:
   --previews diagnostics/previews \
   --jobs 4
 ```
+
+## Tests
 
 Run the tests:
 
