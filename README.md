@@ -19,7 +19,8 @@ On Ubuntu or Linux Mint, install the expected packages with:
 sudo apt install python3-numpy python3-opencv python3-openimageio openimageio-tools openexr python3-pytest python3-tqdm
 ```
 
-Input frames are expected to be `.exr` files.
+Input frames are expected to be `.exr` files. Video files can be decoded to an
+intermediate EXR sequence with `extract-video`.
 
 ## Quick Start
 
@@ -37,6 +38,36 @@ result, and render aligned frames:
 ```
 
 This writes aligned EXR frames to `aligned/` and diagnostics to `diagnostics/`.
+
+## Video Input
+
+Video input is currently handled as an explicit extraction step. Decode the
+video to EXR frames first, then run the normal EXR workflow:
+
+```bash
+/usr/bin/python3 -m eclipse_align extract-video \
+  --input "path/to/eclipse.mp4" \
+  --output extracted_frames
+
+/usr/bin/python3 -m eclipse_align process \
+  --input "extracted_frames/*.exr" \
+  --output aligned \
+  --diagnostics diagnostics \
+  --crop \
+  --margin 80 \
+  --jobs 4
+```
+
+By default, AstroIO chooses the decoded video precision automatically: 8-bit
+sources are decoded as `rgb24`, while higher bit-depth sources are decoded as
+`rgb48le`. The extractor scales integer video values to floating `0..1` EXR
+values and applies `--transfer srgb` by default so normal display-referred video
+is written as linear EXR data. Use `--transfer none` to write scaled but
+non-linear encoded RGB values.
+
+The extractor writes FLOAT EXRs for decoded `uint16` frames to avoid losing
+precision, and HALF EXRs otherwise. You can override this with
+`--output-format` or `--exr-pixel-type`.
 
 ## Two-Step Workflow
 

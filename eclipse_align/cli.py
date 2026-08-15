@@ -11,6 +11,9 @@ import os
 from pathlib import Path
 from typing import Iterable
 
+import numpy as np
+import astroio
+from astroio.exr import write_exr as write_astroio_exr
 from tqdm import tqdm
 
 from .detect import DetectionConfig, detect_file
@@ -80,6 +83,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="add a filled fitted-sun disk as the output alpha channel",
     )
     add_polish_args(process)
+
+    extract_video = subparsers.add_parser("extract-video", help="decode a video into an EXR frame sequence")
+    extract_video.add_argument("--input", required=True, help="input video path")
+    extract_video.add_argument("--output", required=True, help="output EXR frame directory")
+    extract_video.add_argument(
+        "--output-format",
+        default="auto",
+        help="AstroIO video decode format: auto, rgb24, rgb48le, gray, or gray16le",
+    )
+    extract_video.add_argument(
+        "--exr-pixel-type",
+        choices=("auto", "half", "float"),
+        default="auto",
+        help="EXR output pixel type; auto writes FLOAT for uint16 frames and HALF otherwise",
+    )
+    extract_video.add_argument(
+        "--transfer",
+        choices=("srgb", "none"),
+        default="srgb",
+        help="transfer conversion before writing EXR; srgb converts display RGB to linear values",
+    )
+    extract_video.add_argument("--digits", type=int, default=6, help="frame number digits for output filenames")
 
     return parser
 
@@ -240,6 +265,71 @@ def reformatted_output_filename(frame_number: int) -> str:
     if frame_number < 1:
         raise ValueError("frame_number must start at 1")
     return f"frame_{frame_number:04d}.exr"
+
+
+def video_frame_filename(frame_number: int, *, digits: int = 6) -> str:
+    if frame_number < 1:
+        raise ValueError("frame_number must start at 1")
+    if digits < 1:
+        raise ValueError("digits must be at least one")
+    return f"frame_{frame_number:0{digits}d}.exr"
+
+
+def exr_half_for_video_frame(frame: np.ndarray, exr_pixel_type: str) -> bool:
+    if exr_pixel_type == "half":
+        return True
+    if exr_pixel_type == "float":
+        return False
+    if exr_pixel_type != "auto":
+        raise ValueError(f"Unknown EXR pixel type: {exr_pixel_type}")
+    return frame.dtype != np.uint16
+
+
+def video_frame_to_exr_float(frame: np.ndarray, *, transfer: str = "srgb") -> np.ndarray:
+    image = np.asarray(frame)
+    if image.dtype == np.uint8:
+        normalized = image.astype(np.float32) / np.float32(255.0)
+    elif image.dtype == np.uint16:
+        normalized = image.astype(np.float32) / np.float32(65535.0)
+    else:
+        normalized = image.astype(np.float32, copy=False)
+
+    if transfer == "none":
+        return normalized
+    if transfer == "srgb":
+        return srgb_to_linear(normalized)
+    raise ValueError(f"Unknown transfer conversion: {transfer}")
+
+
+def srgb_to_linear(image: np.ndarray) -> np.ndarray:
+    image = np.clip(image, 0.0, 1.0)
+    return np.where(
+        image <= 0.04045,
+        image / 12.92,
+        ((image + 0.055) / 1.055) ** 2.4,
+    ).astype(np.float32)
+
+
+def extract_video_frames(
+    input_path: str | Path,
+    output_dir: str | Path,
+    *,
+    output_format: str = "auto",
+    exr_pixel_type: str = "auto",
+    transfer: str = "srgb",
+    digits: int = 6,
+) -> int:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with astroio.open_reader(input_path, output_format=output_format) as reader:
+        for index, frame in enumerate(tqdm(reader, total=reader.frame_count, desc="extract-video"), start=1):
+            output_path = output_dir / video_frame_filename(index, digits=digits)
+            write_astroio_exr(
+                output_path,
+                video_frame_to_exr_float(frame, transfer=transfer),
+                half=exr_half_for_video_frame(frame, exr_pixel_type),
+            )
+        return reader.frame_count
 
 
 def build_render_payloads(
@@ -651,6 +741,19 @@ def process_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def extract_video_command(args: argparse.Namespace) -> int:
+    count = extract_video_frames(
+        args.input,
+        args.output,
+        output_format=args.output_format,
+        exr_pixel_type=args.exr_pixel_type,
+        transfer=args.transfer,
+        digits=args.digits,
+    )
+    print(f"Extracted {count} frames to {Path(args.output)}")
+    return 0
+
+
 def write_previews(
     inputs: list[Path],
     detections: list[FrameDetection],
@@ -676,5 +779,7 @@ def main(argv: list[str] | None = None) -> int:
         return render_command(args)
     if args.command == "process":
         return process_command(args)
+    if args.command == "extract-video":
+        return extract_video_command(args)
     parser.error(f"Unknown command: {args.command}")
     return 2
