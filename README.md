@@ -58,6 +58,21 @@ video to EXR frames first, then run the normal EXR workflow:
   --jobs 4
 ```
 
+For one event split across multiple video files, pass the files in the order you
+want them decoded. `--input` may be repeated, or one `--input` may be followed
+by multiple paths:
+
+```bash
+/usr/bin/python3 -m eclipse_align extract-video \
+  --input "path/to/video1.mp4" \
+  --input "path/to/video2.mp4" \
+  --output extracted_frames
+
+/usr/bin/python3 -m eclipse_align extract-video \
+  --input "path/to/video1.mp4" "path/to/video2.mp4" \
+  --output extracted_frames
+```
+
 By default, AstroIO chooses the decoded video precision automatically: 8-bit
 sources are decoded as `rgb24`, while higher bit-depth sources are decoded as
 `rgb48le`. The extractor scales integer video values to floating `0..1` EXR
@@ -97,6 +112,10 @@ metadata, or reviewing previews before rendering the final frames:
   rendered frame.
 - Add `--alpha-circle` to `render` or `process` to add the fitted solar disk as
   a filled white alpha channel in each rendered EXR.
+- Add `--prefer-plausible-raw` to `detect` or `process` only after reviewing
+  diagnostics when the raw pre-refinement fit is better than interpolation in
+  obstructed frames. Use `--plausible-raw-range 1225-1300,3720-4461` to limit
+  that behavior to reviewed 1-based frame ranges.
 
 ## Rotation Correction
 

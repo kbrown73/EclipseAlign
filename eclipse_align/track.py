@@ -6,6 +6,21 @@ from .models import FrameDetection
 
 
 MIN_RELIABLE_CONFIDENCE = 0.35
+MIN_RELIABLE_DISTORTED_CONFIDENCE = 0.75
+UNRELIABLE_TRACKING_FLAGS = {
+    "center_outlier",
+    "photobomb_suspected",
+    "radius_outlier",
+}
+
+
+def has_unreliable_tracking_flags(detection: FrameDetection) -> bool:
+    if any(flag in UNRELIABLE_TRACKING_FLAGS for flag in detection.flags):
+        return True
+    return (
+        "distorted_limb_suspected" in detection.flags
+        and detection.confidence < MIN_RELIABLE_DISTORTED_CONFIDENCE
+    )
 
 
 def is_reliable_detection(detection: FrameDetection) -> bool:
@@ -13,14 +28,25 @@ def is_reliable_detection(detection: FrameDetection) -> bool:
         detection.has_center
         and detection.confidence >= MIN_RELIABLE_CONFIDENCE
         and detection.status in {"ok", "clipped"}
+        and not has_unreliable_tracking_flags(detection)
     )
 
 
 def estimate_common_radius(detections: list[FrameDetection]) -> float | None:
+    clean_radii = [
+        d.radius
+        for d in detections
+        if d.radius is not None and is_reliable_detection(d)
+    ]
+    if clean_radii:
+        return float(np.median(np.asarray(clean_radii, dtype=np.float64)))
+
     radii = [
         d.radius
         for d in detections
-        if d.radius is not None and d.confidence >= MIN_RELIABLE_CONFIDENCE and d.status in {"ok", "clipped"}
+        if d.radius is not None
+        and d.confidence >= MIN_RELIABLE_CONFIDENCE
+        and d.status in {"ok", "clipped"}
     ]
     if not radii:
         return None
@@ -71,7 +97,7 @@ def fill_missing_centers(detections: list[FrameDetection], common_radius: float 
             continue
         detection.center_x = float(interp_x[idx])
         detection.center_y = float(interp_y[idx])
-        if detection.radius is None:
+        if common_radius is not None:
             detection.radius = common_radius
         detection.status = "estimated"
         detection.confidence = min(detection.confidence, 0.25)
@@ -85,6 +111,8 @@ def preserve_raw_centers(detections: list[FrameDetection]) -> None:
             detection.raw_center_x = detection.center_x
         if detection.raw_center_y is None:
             detection.raw_center_y = detection.center_y
+        if detection.raw_radius is None:
+            detection.raw_radius = detection.radius
 
 
 def assign_translations(

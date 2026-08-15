@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shlex
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import replace
@@ -24,7 +25,13 @@ from .models import FrameDetection, detection_by_name, metadata_document
 from .polish import PolishConfig, polish_aligned_outputs
 from .render import compute_centered_square_crop, compute_safe_crop, parse_manual_crop, render_frame
 from .rotation import RotationConfig, estimate_rotations
-from .track import refine_detections
+from .track import (
+    MIN_RELIABLE_CONFIDENCE,
+    MIN_RELIABLE_DISTORTED_CONFIDENCE,
+    assign_translations,
+    estimate_common_radius,
+    refine_detections,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -85,7 +92,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_polish_args(process)
 
     extract_video = subparsers.add_parser("extract-video", help="decode a video into an EXR frame sequence")
-    extract_video.add_argument("--input", required=True, help="input video path")
+    extract_video.add_argument(
+        "--input",
+        required=True,
+        action="append",
+        nargs="+",
+        help="input video path(s), in chronological order; may be repeated",
+    )
     extract_video.add_argument("--output", required=True, help="output EXR frame directory")
     extract_video.add_argument(
         "--output-format",
@@ -152,6 +165,21 @@ def add_detection_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=1600,
         help="max dimension for diagnostic previews; use 0 for full resolution",
+    )
+    parser.add_argument(
+        "--prefer-plausible-raw",
+        action="store_true",
+        help="use plausible low-confidence raw fits instead of interpolation across all frames",
+    )
+    parser.add_argument(
+        "--plausible-raw-range",
+        action="append",
+        default=[],
+        metavar="START-END[,START-END...]",
+        help=(
+            "limit plausible raw fit overrides to comma-separated 1-based inclusive frame ranges; "
+            "may be repeated, e.g. 1225-1300,3720-4461"
+        ),
     )
 
 
@@ -236,9 +264,9 @@ def parallel_run_unordered(fn, items, *, jobs: int, desc: str) -> None:
             future.result()
 
 
-def detect_worker(payload: tuple[str, DetectionConfig]) -> FrameDetection:
-    path, config = payload
-    return detect_file(path, config)
+def detect_worker(payload: tuple[str, DetectionConfig, float | None]) -> FrameDetection:
+    path, config, expected_radius = payload
+    return detect_file(path, config, expected_radius=expected_radius)
 
 
 def preview_worker(payload: tuple[str, FrameDetection, DetectionConfig, str, int]) -> None:
@@ -259,6 +287,163 @@ def render_worker(payload: tuple[str, str, FrameDetection, object, bool, bool]) 
         add_alpha_circle=add_alpha_circle,
     )
     return True
+
+
+def needs_radius_constrained_retry(detection: FrameDetection) -> bool:
+    retry_flags = {"radius_outlier", "insufficient_limb"}
+    if detection.status in {"failed", "low_confidence"} or any(flag in retry_flags for flag in detection.flags):
+        return True
+    return (
+        "distorted_limb_suspected" in detection.flags
+        and detection.confidence < MIN_RELIABLE_DISTORTED_CONFIDENCE
+    )
+
+
+def retry_improves_detection(
+    original: FrameDetection,
+    candidate: FrameDetection,
+    common_radius: float,
+) -> bool:
+    if not candidate.has_center or candidate.radius is None:
+        return False
+    if candidate.status not in {"ok", "clipped"}:
+        return False
+    if "distorted_limb_suspected" in candidate.flags or "radius_outlier" in candidate.flags:
+        return False
+    radius_error = abs(candidate.radius - common_radius) / max(common_radius, 1.0)
+    if radius_error > 0.20:
+        return False
+
+    original_residual = original.circle_residual_median_px
+    candidate_residual = candidate.circle_residual_median_px
+    if original_residual is not None and candidate_residual is not None and candidate_residual > original_residual:
+        return False
+
+    if candidate.confidence >= MIN_RELIABLE_CONFIDENCE:
+        return True
+    return candidate.confidence > original.confidence
+
+
+def improve_suspicious_detections(
+    inputs: list[Path],
+    detections: list[FrameDetection],
+    config: DetectionConfig,
+    *,
+    jobs: int,
+) -> tuple[float | None, int]:
+    common_radius = estimate_common_radius(detections)
+    if common_radius is None:
+        return None, 0
+
+    retry_indexes = [
+        idx
+        for idx, detection in enumerate(detections)
+        if needs_radius_constrained_retry(detection)
+    ]
+    if not retry_indexes:
+        return common_radius, 0
+
+    retries = parallel_map_ordered(
+        detect_worker,
+        [(str(inputs[idx]), config, common_radius) for idx in retry_indexes],
+        jobs=jobs,
+        desc="redetect",
+    )
+
+    improved = 0
+    for idx, retry in zip(retry_indexes, retries):
+        if not retry_improves_detection(detections[idx], retry, common_radius):
+            continue
+        retry.flags.append("radius_constrained_redetect")
+        detections[idx] = retry
+        improved += 1
+    return estimate_common_radius(detections), improved
+
+
+PLAUSIBLE_RAW_RADIUS_TOLERANCE = 0.25
+PLAUSIBLE_RAW_MIN_CONFIDENCE = 0.08
+PLAUSIBLE_RAW_MIN_SUPPORT = 0.35
+PLAUSIBLE_RAW_MAX_MEDIAN_RESIDUAL_PX = 50.0
+
+
+def parse_plausible_raw_ranges(values: list[str], frame_count: int) -> set[int]:
+    indexes: set[int] = set()
+    for value in values:
+        for part in value.split(","):
+            token = part.strip()
+            if not token:
+                continue
+            if "-" in token:
+                start_text, end_text = token.split("-", 1)
+            else:
+                start_text = token
+                end_text = token
+            try:
+                start = int(start_text)
+                end = int(end_text)
+            except ValueError as exc:
+                raise SystemExit(f"Invalid --plausible-raw-range value: {token}") from exc
+            if start < 1 or end < start or end > frame_count:
+                raise SystemExit(
+                    f"--plausible-raw-range must be within 1-{frame_count} and ordered: {token}"
+                )
+            indexes.update(range(start - 1, end))
+    return indexes
+
+
+def plausible_raw_indexes(args: argparse.Namespace, frame_count: int) -> set[int]:
+    ranges = parse_plausible_raw_ranges(args.plausible_raw_range, frame_count)
+    if ranges:
+        return ranges
+    if args.prefer_plausible_raw:
+        return set(range(frame_count))
+    return set()
+
+
+def is_plausible_raw_fit(detection: FrameDetection, common_radius: float | None) -> bool:
+    if common_radius is None:
+        return False
+    if detection.raw_center_x is None or detection.raw_center_y is None or detection.raw_radius is None:
+        return False
+    if detection.status != "estimated" and "interpolated" not in detection.flags:
+        return False
+    if detection.confidence < PLAUSIBLE_RAW_MIN_CONFIDENCE:
+        return False
+    if (
+        detection.limb_support_fraction is None
+        or detection.limb_support_fraction < PLAUSIBLE_RAW_MIN_SUPPORT
+    ):
+        return False
+    if (
+        detection.circle_residual_median_px is None
+        or detection.circle_residual_median_px > PLAUSIBLE_RAW_MAX_MEDIAN_RESIDUAL_PX
+    ):
+        return False
+    radius_error = abs(detection.raw_radius - common_radius) / max(common_radius, 1.0)
+    return radius_error <= PLAUSIBLE_RAW_RADIUS_TOLERANCE
+
+
+def apply_plausible_raw_overrides(
+    detections: list[FrameDetection],
+    indexes: set[int],
+    common_radius: float | None,
+) -> int:
+    applied = 0
+    for idx in sorted(indexes):
+        detection = detections[idx]
+        if not is_plausible_raw_fit(detection, common_radius):
+            continue
+        detection.center_x = detection.raw_center_x
+        detection.center_y = detection.raw_center_y
+        detection.radius = detection.raw_radius
+        detection.status = "estimated"
+        detection.flags = [flag for flag in detection.flags if flag != "interpolated"]
+        if "raw_fit_override" not in detection.flags:
+            detection.flags.append("raw_fit_override")
+        applied += 1
+    if applied:
+        assign_translations(detections)
+    return applied
 
 
 def reformatted_output_filename(frame_number: int) -> str:
@@ -310,8 +495,40 @@ def srgb_to_linear(image: np.ndarray) -> np.ndarray:
     ).astype(np.float32)
 
 
+def normalize_video_inputs(input_paths: str | Path | Iterable[str | Path | Iterable[str | Path]]) -> list[Path]:
+    paths: list[Path] = []
+
+    def add_input(raw_input: str | Path) -> None:
+        if isinstance(raw_input, Path):
+            paths.append(raw_input)
+            return
+
+        input_text = raw_input.strip()
+        input_path = Path(input_text)
+        if not input_text:
+            return
+        if input_path.exists() or not any(char.isspace() for char in input_text):
+            paths.append(input_path)
+            return
+        paths.extend(Path(part) for part in shlex.split(input_text))
+
+    if isinstance(input_paths, (str, Path)):
+        add_input(input_paths)
+    else:
+        for raw_input in input_paths:
+            if isinstance(raw_input, (str, Path)):
+                add_input(raw_input)
+            else:
+                for part in raw_input:
+                    add_input(part)
+
+    if not paths:
+        raise ValueError("at least one input video path is required")
+    return paths
+
+
 def extract_video_frames(
-    input_path: str | Path,
+    input_path: str | Path | Iterable[str | Path | Iterable[str | Path]],
     output_dir: str | Path,
     *,
     output_format: str = "auto",
@@ -319,17 +536,26 @@ def extract_video_frames(
     transfer: str = "srgb",
     digits: int = 6,
 ) -> int:
+    input_paths = normalize_video_inputs(input_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    with astroio.open_reader(input_path, output_format=output_format) as reader:
-        for index, frame in enumerate(tqdm(reader, total=reader.frame_count, desc="extract-video"), start=1):
-            output_path = output_dir / video_frame_filename(index, digits=digits)
-            write_astroio_exr(
-                output_path,
-                video_frame_to_exr_float(frame, transfer=transfer),
-                half=exr_half_for_video_frame(frame, exr_pixel_type),
-            )
-        return reader.frame_count
+    frame_number = 1
+    total_count = 0
+    for path in input_paths:
+        desc = "extract-video" if len(input_paths) == 1 else f"extract-video {path.name}"
+        with astroio.open_reader(path, output_format=output_format) as reader:
+            written = 0
+            for frame in tqdm(reader, total=reader.frame_count, desc=desc):
+                output_path = output_dir / video_frame_filename(frame_number, digits=digits)
+                write_astroio_exr(
+                    output_path,
+                    video_frame_to_exr_float(frame, transfer=transfer),
+                    half=exr_half_for_video_frame(frame, exr_pixel_type),
+                )
+                frame_number += 1
+                written += 1
+            total_count += written
+    return total_count
 
 
 def build_render_payloads(
@@ -522,11 +748,17 @@ def detect_command(args: argparse.Namespace) -> int:
 
     detections = parallel_map_ordered(
         detect_worker,
-        [(str(path), config) for path in inputs],
+        [(str(path), config, None) for path in inputs],
         jobs=jobs,
         desc="detect",
     )
+    common_radius, redetected = improve_suspicious_detections(inputs, detections, config, jobs=jobs)
     common_radius = refine_detections(detections)
+    raw_overrides = apply_plausible_raw_overrides(
+        detections,
+        plausible_raw_indexes(args, len(detections)),
+        common_radius,
+    )
     rotation_boundaries = []
     if args.detect_rotation:
         rotation_boundaries = estimate_rotations(
@@ -574,6 +806,10 @@ def detect_command(args: argparse.Namespace) -> int:
         )
 
     print(f"Detected {len(detections)} frames: {summarize(detections)}")
+    if redetected:
+        print(f"Radius-constrained redetect improved {redetected} frames")
+    if raw_overrides:
+        print(f"Plausible raw fit overrides applied to {raw_overrides} frames")
     if common_radius is not None:
         print(f"Common radius estimate: {common_radius:.2f}px")
     if dust_result is not None:
@@ -658,11 +894,17 @@ def process_command(args: argparse.Namespace) -> int:
 
     detections = parallel_map_ordered(
         detect_worker,
-        [(str(path), config) for path in inputs],
+        [(str(path), config, None) for path in inputs],
         jobs=jobs,
         desc="detect",
     )
+    common_radius, redetected = improve_suspicious_detections(inputs, detections, config, jobs=jobs)
     common_radius = refine_detections(detections)
+    raw_overrides = apply_plausible_raw_overrides(
+        detections,
+        plausible_raw_indexes(args, len(detections)),
+        common_radius,
+    )
     rotation_boundaries = []
     if args.detect_rotation:
         rotation_boundaries = estimate_rotations(
@@ -722,6 +964,10 @@ def process_command(args: argparse.Namespace) -> int:
     )
 
     print(f"Detected {len(detections)} frames: {summarize(detections)}")
+    if redetected:
+        print(f"Radius-constrained redetect improved {redetected} frames")
+    if raw_overrides:
+        print(f"Plausible raw fit overrides applied to {raw_overrides} frames")
     print(f"Rendered {rendered} frames to {output_dir}")
     if args.polish_alignment:
         print(f"Polished {polished} frames")

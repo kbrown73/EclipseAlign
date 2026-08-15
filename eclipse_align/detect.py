@@ -191,6 +191,24 @@ def contour_points(component_mask: np.ndarray) -> np.ndarray:
     return contour.reshape(-1, 2).astype(np.float32)
 
 
+def limb_fit_points(
+    points: np.ndarray,
+    mask_shape: tuple[int, int],
+    edge_margin: int,
+    config: DetectionConfig,
+) -> np.ndarray:
+    height, width = mask_shape
+    interior = points[
+        (points[:, 0] > edge_margin)
+        & (points[:, 0] < width - 1 - edge_margin)
+        & (points[:, 1] > edge_margin)
+        & (points[:, 1] < height - 1 - edge_margin)
+    ]
+    if len(interior) >= config.min_limb_points:
+        return interior
+    return points
+
+
 def detect_image(
     image: np.ndarray,
     filename: str,
@@ -216,8 +234,10 @@ def detect_image(
             flags=["insufficient_limb"],
         )
 
+    edge_margin = max(2, int(round(4 * scale)))
+    fit_points = limb_fit_points(points, component.shape, edge_margin, config)
     scaled_expected = expected_radius * scale if expected_radius is not None else None
-    fit = robust_circle_fit(points, config, expected_radius=scaled_expected)
+    fit = robust_circle_fit(fit_points, config, expected_radius=scaled_expected)
     if fit is None:
         return FrameDetection(
             filename=filename,
@@ -228,7 +248,7 @@ def detect_image(
         )
 
     cx, cy, radius, confidence = fit
-    distances = np.hypot(points[:, 0] - cx, points[:, 1] - cy)
+    distances = np.hypot(fit_points[:, 0] - cx, fit_points[:, 1] - cy)
     residuals = np.abs(distances - radius)
     tolerance = max(2.0, radius * config.ransac_tolerance_fraction)
     limb_support_fraction = float(np.mean(residuals <= tolerance))
@@ -247,7 +267,6 @@ def detect_image(
 
     ys, xs = np.nonzero(component)
     flags: list[str] = []
-    edge_margin = max(2, int(round(4 * scale)))
     if xs.min() <= edge_margin:
         flags.append("touches_left_edge")
     if xs.max() >= component.shape[1] - 1 - edge_margin:

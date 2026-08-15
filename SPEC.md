@@ -161,6 +161,8 @@ For frames with the eclipse touching or crossing an image edge:
 
 - Mark the frame as `clipped`.
 - Fit the circle from the visible limb if enough edge points exist.
+- Ignore artificial image-border contour segments when fitting the circle; they
+  indicate clipping but are not solar limb evidence.
 - Permit the fitted center to lie outside the image bounds.
 - Lower confidence compared with fully visible frames.
 - If fitting fails, interpolate or extrapolate center from neighboring valid frames and mark as `estimated`.
@@ -175,6 +177,58 @@ After per-frame detection:
 - Fill failed detections from nearby valid detections where possible.
 
 Manual reframing means the observed raw center track is not globally smooth. The aligner should tolerate piecewise smooth motion with occasional jumps.
+
+### Reviewed Detection Overrides
+
+Heavily obstructed frames can be ambiguous enough that the automatic policy
+cannot safely choose between the raw fit and temporal interpolation. The CLI
+supports guarded raw-fit overrides for reviewed sections; future UI/manual
+work should build on the same auditable metadata path.
+
+Supported raw-fit override behavior:
+
+- `--prefer-plausible-raw`: prefer plausible raw fits globally after visual
+  review.
+- `--plausible-raw-range START-END[,START-END...]`: prefer plausible raw fits
+  only in reviewed 1-based inclusive frame ranges. The option accepts
+  comma-separated range lists such as `1225-1300,3720-4461`, may be repeated,
+  and implies raw-fit preference for those ranges.
+- Plausible raw fits still apply guardrails: raw center and raw radius must
+  exist, raw radius must be reasonably close to the sequence common radius,
+  confidence must be above a low floor, limb support must not be extremely poor,
+  and median residual must not be huge.
+- Applied raw-fit overrides must be recorded in metadata with `raw_fit_override`.
+- Diagnostic previews should continue to show both raw and final fits so manual
+  choices remain auditable.
+
+Future manual override concepts:
+
+- A per-frame override file for UI or hand-authored corrections, for example
+  `--overrides diagnostics/overrides.csv`.
+- Override records should support at least `use_raw`, `manual`, and `ignore`.
+- `manual` should accept explicit `center_x`, `center_y`, and optional `radius`.
+- Applied overrides must be recorded in metadata with clear flags such as
+  `manual_center_override`.
+
+### Horizon and Atmospheric Distortion
+
+Low-altitude sunset frames can break the V1 circular-disk assumption. Near the
+horizon, atmospheric refraction, clouds, and foreground obstruction can flatten
+or shear the apparent sun enough that a circular fit with a sequence-wide common
+radius becomes misleading. In these sections the raw pre-refinement fit may be
+visually better than interpolation for some frames, while nearby raw fits may
+lock onto the horizon, clouds, or the moon edge.
+
+This should remain a reviewed/manual workflow unless a stronger model is added.
+Future approaches could include:
+
+- A range-scoped "horizon mode" that relaxes common-radius checks and treats the
+  raw center as a candidate instead of immediately preferring interpolation.
+- Ellipse or arc fitting for visibly flattened sunset disks.
+- Segment-local radius estimates rather than one global common radius.
+- Per-frame or range-based manual overrides for centers and alpha masks.
+- Diagnostics that graph raw/final center offsets, raw radius, confidence, and
+  residuals over time so problematic horizon ranges are easy to identify.
 
 ## Alignment
 
@@ -221,6 +275,7 @@ Write JSON metadata with one record per frame:
   "center_y": 1833.0,
   "raw_center_x": 2747.4,
   "raw_center_y": 1832.6,
+  "raw_radius": 419.8,
   "radius": 420.0,
   "confidence": 0.98,
   "status": "ok",
@@ -249,6 +304,9 @@ Possible flags:
 - `photobomb_suspected`
 - `insufficient_limb`
 - `interpolated`
+- `radius_constrained_redetect`
+- `raw_fit_override`
+- `manual_center_override`
 - `distorted_limb_suspected`
 
 Metadata should also include circle-fit quality fields when available:

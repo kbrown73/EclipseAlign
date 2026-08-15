@@ -7,6 +7,7 @@ import OpenImageIO as oiio
 from eclipse_align.cli import (
     exr_half_for_video_frame,
     extract_video_frames,
+    normalize_video_inputs,
     srgb_to_linear,
     video_frame_to_exr_float,
     video_frame_filename,
@@ -89,3 +90,35 @@ def test_extract_video_frames_writes_exr_sequence(tmp_path):
     assert frame.shape == (3, 4, 3)
     assert frame.dtype == np.float32
     assert float(frame.max()) <= 1.0
+
+
+def test_extract_video_frames_concatenates_multiple_inputs(tmp_path):
+    first_video = tmp_path / "first.mp4"
+    second_video = tmp_path / "second.mp4"
+    output_dir = tmp_path / "frames"
+    write_test_mp4(first_video, frame_count=2)
+    write_test_mp4(second_video, frame_count=3)
+
+    count = extract_video_frames([first_video, second_video], output_dir, digits=4)
+
+    outputs = sorted(output_dir.glob("*.exr"))
+    assert count == 5
+    assert [path.name for path in outputs] == [
+        "frame_0001.exr",
+        "frame_0002.exr",
+        "frame_0003.exr",
+        "frame_0004.exr",
+        "frame_0005.exr",
+    ]
+
+
+def test_normalize_video_inputs_preserves_repeat_and_argument_order():
+    inputs = normalize_video_inputs([["first.mp4"], ["second.mp4", "third.mp4"]])
+
+    assert [path.as_posix() for path in inputs] == ["first.mp4", "second.mp4", "third.mp4"]
+
+
+def test_normalize_video_inputs_splits_quoted_multi_path_value():
+    inputs = normalize_video_inputs([['"first video.mp4" second.mp4']])
+
+    assert [path.as_posix() for path in inputs] == ["first video.mp4", "second.mp4"]
