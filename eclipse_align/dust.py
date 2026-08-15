@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-from .detect import DetectionConfig, downsample_for_detection, luminance, normalize_luminance
+from .detect import DetectionConfig, downsample_for_detection, luminance, normalize_luminance, robust_circle_fit
 from .exr_io import read_exr
 from .models import FrameDetection
 
@@ -27,6 +27,7 @@ class DustConfig:
     min_hit_fraction: float = 0.10
     min_component_area: int = 4
     max_component_area_fraction: float = 0.01
+    min_component_extent: float = 0.18
     frame_edge_margin_px: int = 32
     edge_veto_percentile: float = 98.5
     edge_veto_dilation_radius_fraction: float = 0.012
@@ -34,6 +35,21 @@ class DustConfig:
     edge_veto_min_component_aspect_ratio: float = 5.0
     max_candidate_component_area_fraction: float = 0.02
     max_candidate_component_aspect_ratio: float = 6.0
+    min_candidate_component_extent: float = 0.18
+    moon_limb_min_component_area: int = 64
+    moon_limb_min_points: int = 96
+    moon_limb_radius_tolerance_fraction: float = 0.25
+    moon_limb_min_support_fraction: float = 0.48
+    moon_limb_min_arc_span_degrees: float = 45.0
+    moon_limb_max_center_distance_radius_fraction: float = 2.5
+    moon_limb_veto_band_radius_fraction: float = 0.07
+    solar_limb_veto_band_radius_fraction: float = 0.035
+    solar_limb_min_component_band_fraction: float = 0.45
+    moon_shadow_max_normalized_luminance: float = 0.16
+    moon_shadow_min_component_area: int = 32
+    moon_shadow_min_component_area_fraction: float = 0.0012
+    moon_shadow_boundary_band_radius_fraction: float = 0.035
+    moon_shadow_min_component_boundary_fraction: float = 0.45
 
 
 @dataclass
@@ -47,6 +63,31 @@ class DustComponent:
     max_score: float
     median_support_frames: float
     median_hit_frames: float
+
+
+@dataclass
+class LimbCircleFit:
+    center_x: float
+    center_y: float
+    radius: float
+    support_fraction: float
+    arc_span_degrees: float
+
+
+@dataclass
+class LimbEllipseFit:
+    center_x: float
+    center_y: float
+    major_radius: float
+    minor_radius: float
+    angle_deg: float
+
+
+@dataclass
+class DustFrameDiagnostics:
+    sun_circle: LimbCircleFit
+    sun_ellipse: LimbEllipseFit | None
+    moon_circle: LimbCircleFit | None
 
 
 @dataclass
@@ -114,7 +155,7 @@ def analyze_dust_arrays(
         candidate = dust_candidate_masks(image, detection, config)
         if candidate is None:
             continue
-        candidate_mask, support_mask, work_image, frame_scale = candidate
+        candidate_mask, support_mask, work_image, frame_scale, frame_diagnostics = candidate
         if support_map is None:
             map_height, map_width = candidate_mask.shape
             support_map = np.zeros((map_height, map_width), dtype=np.float32)
@@ -133,6 +174,7 @@ def analyze_dust_arrays(
                 work_image,
                 candidate_mask,
                 support_mask,
+                frame_diagnostics,
                 preview_max_dim=preview_max_dim,
             )
 
@@ -168,7 +210,7 @@ def dust_candidate_masks(
     image: np.ndarray,
     detection: FrameDetection,
     config: DustConfig,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, float] | None:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, DustFrameDiagnostics] | None:
     if detection.radius is None or detection.raw_center_x is None or detection.raw_center_y is None:
         return None
     if detection.status not in {"ok", "clipped", "low_confidence", "estimated"}:
@@ -180,6 +222,7 @@ def dust_candidate_masks(
     if not np.any(finite):
         return None
     luma = np.where(finite, luma, 0.0).astype(np.float32)
+    normalized_luma = normalize_luminance(luma, DetectionConfig())
 
     radius = float(detection.radius) * scale
     center_x = float(detection.raw_center_x) * scale
@@ -210,7 +253,44 @@ def dust_candidate_masks(
     candidate_mask &= ~edge_veto
     candidate_mask = clean_binary_mask(candidate_mask)
     candidate_mask = filter_candidate_components(candidate_mask, config)
-    return candidate_mask, support_mask, work_image, scale
+    moon_fit = fit_moon_limb_candidate(
+        candidate_mask,
+        sun_center_x=center_x,
+        sun_center_y=center_y,
+        sun_radius=radius,
+        config=config,
+    )
+    if moon_fit is not None:
+        candidate_mask &= ~limb_circle_band_mask(candidate_mask.shape, moon_fit, config.moon_limb_veto_band_radius_fraction)
+    solar_limb_veto = solar_limb_candidate_veto(
+        candidate_mask,
+        sun_center_x=center_x,
+        sun_center_y=center_y,
+        sun_radius=radius,
+        config=config,
+    )
+    candidate_mask &= ~solar_limb_veto
+    moon_shadow_veto = moon_shadow_boundary_veto(
+        candidate_mask,
+        normalized_luma=normalized_luma,
+        disk_mask=disk_mask,
+        sun_radius=radius,
+        config=config,
+    )
+    candidate_mask &= ~moon_shadow_veto
+    candidate_mask = filter_candidate_components(candidate_mask, config)
+    frame_diagnostics = DustFrameDiagnostics(
+        sun_circle=LimbCircleFit(
+            center_x=center_x,
+            center_y=center_y,
+            radius=radius,
+            support_fraction=1.0,
+            arc_span_degrees=360.0,
+        ),
+        sun_ellipse=scaled_sun_ellipse(detection, scale),
+        moon_circle=moon_fit,
+    )
+    return candidate_mask, support_mask, work_image, scale, frame_diagnostics
 
 
 def build_dust_result(
@@ -264,7 +344,10 @@ def dust_components(
     component_id = 1
     for label in range(1, count):
         area = int(stats[label, cv2.CC_STAT_AREA])
-        if area < config.min_component_area or area > max_area:
+        width = int(stats[label, cv2.CC_STAT_WIDTH])
+        height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        extent = component_extent(area, width, height)
+        if area < config.min_component_area or area > max_area or extent < config.min_component_extent:
             continue
         region = labels == label
         center_x, center_y = centroids[label]
@@ -296,7 +379,10 @@ def filtered_component_mask(mask: np.ndarray, config: DustConfig) -> np.ndarray:
     max_area = mask.shape[0] * mask.shape[1] * config.max_component_area_fraction
     for label in range(1, count):
         area = int(stats[label, cv2.CC_STAT_AREA])
-        if config.min_component_area <= area <= max_area:
+        width = int(stats[label, cv2.CC_STAT_WIDTH])
+        height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        extent = component_extent(area, width, height)
+        if config.min_component_area <= area <= max_area and extent >= config.min_component_extent:
             output[labels == label] = 255
     return output
 
@@ -322,8 +408,213 @@ def filter_candidate_components(mask: np.ndarray, config: DustConfig) -> np.ndar
         aspect = max(width, height) / max(min(width, height), 1)
         if aspect > config.max_candidate_component_aspect_ratio:
             continue
+        extent = component_extent(area, width, height)
+        if extent < config.min_candidate_component_extent:
+            continue
         output[labels == label] = True
     return output
+
+
+def component_extent(area: int, width: int, height: int) -> float:
+    return area / max(width * height, 1)
+
+
+def moon_limb_candidate_veto(
+    candidate_mask: np.ndarray,
+    *,
+    sun_center_x: float,
+    sun_center_y: float,
+    sun_radius: float,
+    config: DustConfig,
+) -> np.ndarray:
+    fit = fit_moon_limb_candidate(
+        candidate_mask,
+        sun_center_x=sun_center_x,
+        sun_center_y=sun_center_y,
+        sun_radius=sun_radius,
+        config=config,
+    )
+    if fit is None:
+        return np.zeros(candidate_mask.shape, dtype=bool)
+    return limb_circle_band_mask(candidate_mask.shape, fit, config.moon_limb_veto_band_radius_fraction)
+
+
+def fit_moon_limb_candidate(
+    candidate_mask: np.ndarray,
+    *,
+    sun_center_x: float,
+    sun_center_y: float,
+    sun_radius: float,
+    config: DustConfig,
+) -> LimbCircleFit | None:
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate_mask.astype(np.uint8), connectivity=8)
+    point_sets = []
+    for label in range(1, count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < config.moon_limb_min_component_area:
+            continue
+        ys, xs = np.nonzero(labels == label)
+        point_sets.append(np.column_stack([xs, ys]).astype(np.float32))
+
+    if not point_sets:
+        return None
+    points = np.vstack(point_sets)
+    if len(points) < config.moon_limb_min_points:
+        return None
+
+    fit_config = DetectionConfig(
+        work_max_dim=config.work_max_dim,
+        min_limb_points=config.moon_limb_min_points,
+        ransac_iterations=600,
+    )
+    fit = robust_circle_fit(points, fit_config, expected_radius=sun_radius)
+    if fit is None:
+        return None
+
+    moon_center_x, moon_center_y, moon_radius, _ = fit
+    if not all(np.isfinite(value) for value in (moon_center_x, moon_center_y, moon_radius)):
+        return None
+    radius_error = abs(moon_radius - sun_radius) / max(sun_radius, 1.0)
+    if radius_error > config.moon_limb_radius_tolerance_fraction:
+        return None
+    center_distance = float(np.hypot(moon_center_x - sun_center_x, moon_center_y - sun_center_y))
+    if center_distance > sun_radius * config.moon_limb_max_center_distance_radius_fraction:
+        return None
+
+    residuals = np.abs(np.hypot(points[:, 0] - moon_center_x, points[:, 1] - moon_center_y) - moon_radius)
+    support_tolerance = max(2.0, moon_radius * config.moon_limb_veto_band_radius_fraction * 0.5)
+    inliers = residuals <= support_tolerance
+    support_fraction = float(np.mean(inliers))
+    if support_fraction < config.moon_limb_min_support_fraction:
+        return None
+    arc_span_degrees = angular_span_degrees(points[inliers], moon_center_x, moon_center_y)
+    if arc_span_degrees < config.moon_limb_min_arc_span_degrees:
+        return None
+
+    return LimbCircleFit(
+        center_x=float(moon_center_x),
+        center_y=float(moon_center_y),
+        radius=float(moon_radius),
+        support_fraction=support_fraction,
+        arc_span_degrees=arc_span_degrees,
+    )
+
+
+def limb_circle_band_mask(
+    shape: tuple[int, int],
+    fit: LimbCircleFit,
+    band_radius_fraction: float,
+) -> np.ndarray:
+    yy, xx = np.ogrid[: shape[0], : shape[1]]
+    band_width = max(3.0, fit.radius * band_radius_fraction)
+    distance = np.hypot(xx - fit.center_x, yy - fit.center_y)
+    return np.abs(distance - fit.radius) <= band_width
+
+
+def angular_span_degrees(points: np.ndarray, center_x: float, center_y: float) -> float:
+    if len(points) == 0:
+        return 0.0
+    angles = np.sort((np.arctan2(points[:, 1] - center_y, points[:, 0] - center_x) + 2.0 * np.pi) % (2.0 * np.pi))
+    gaps = np.diff(np.concatenate([angles, [angles[0] + 2.0 * np.pi]]))
+    span = 2.0 * np.pi - float(np.max(gaps))
+    return float(np.degrees(span))
+
+
+def scaled_sun_ellipse(detection: FrameDetection, scale: float) -> LimbEllipseFit | None:
+    if (
+        detection.ellipse_center_x is None
+        or detection.ellipse_center_y is None
+        or detection.ellipse_major_radius is None
+        or detection.ellipse_minor_radius is None
+        or detection.ellipse_angle_deg is None
+    ):
+        return None
+    return LimbEllipseFit(
+        center_x=float(detection.ellipse_center_x) * scale,
+        center_y=float(detection.ellipse_center_y) * scale,
+        major_radius=float(detection.ellipse_major_radius) * scale,
+        minor_radius=float(detection.ellipse_minor_radius) * scale,
+        angle_deg=float(detection.ellipse_angle_deg),
+    )
+
+
+def solar_limb_candidate_veto(
+    candidate_mask: np.ndarray,
+    *,
+    sun_center_x: float,
+    sun_center_y: float,
+    sun_radius: float,
+    config: DustConfig,
+) -> np.ndarray:
+    yy, xx = np.ogrid[: candidate_mask.shape[0], : candidate_mask.shape[1]]
+    band_width = max(1.5, sun_radius * config.solar_limb_veto_band_radius_fraction)
+    solar_limb_band = np.abs(np.hypot(xx - sun_center_x, yy - sun_center_y) - sun_radius) <= band_width
+
+    count, labels, _, _ = cv2.connectedComponentsWithStats(candidate_mask.astype(np.uint8), connectivity=8)
+    veto = np.zeros(candidate_mask.shape, dtype=bool)
+    for label in range(1, count):
+        region = labels == label
+        if float(np.mean(solar_limb_band[region])) >= config.solar_limb_min_component_band_fraction:
+            veto[region] = True
+    return veto
+
+
+def moon_shadow_boundary_veto(
+    candidate_mask: np.ndarray,
+    *,
+    normalized_luma: np.ndarray,
+    disk_mask: np.ndarray,
+    sun_radius: float,
+    config: DustConfig,
+) -> np.ndarray:
+    dark_mask = (
+        disk_mask
+        & np.isfinite(normalized_luma)
+        & (normalized_luma <= config.moon_shadow_max_normalized_luminance)
+    )
+    if not np.any(dark_mask):
+        return np.zeros(candidate_mask.shape, dtype=bool)
+
+    clean_kernel = np.ones((3, 3), np.uint8)
+    dark_mask = cv2.morphologyEx(dark_mask.astype(np.uint8), cv2.MORPH_OPEN, clean_kernel, iterations=1).astype(bool)
+    dark_mask &= disk_mask
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(dark_mask.astype(np.uint8), connectivity=8)
+    if count <= 1:
+        return np.zeros(candidate_mask.shape, dtype=bool)
+
+    min_area = max(
+        config.moon_shadow_min_component_area,
+        int(round(np.pi * sun_radius * sun_radius * config.moon_shadow_min_component_area_fraction)),
+    )
+    boundary_radius = max(2, int(round(sun_radius * config.moon_shadow_boundary_band_radius_fraction)))
+    boundary_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (2 * boundary_radius + 1, 2 * boundary_radius + 1),
+    )
+    boundary_band = np.zeros(candidate_mask.shape, dtype=bool)
+    for label in range(1, count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        component = labels == label
+        dilated = cv2.dilate(component.astype(np.uint8), boundary_kernel, iterations=1).astype(bool)
+        eroded = cv2.erode(component.astype(np.uint8), boundary_kernel, iterations=1).astype(bool)
+        boundary_band |= dilated & ~eroded
+
+    if not np.any(boundary_band):
+        return np.zeros(candidate_mask.shape, dtype=bool)
+
+    candidate_count, candidate_labels, _, _ = cv2.connectedComponentsWithStats(
+        candidate_mask.astype(np.uint8),
+        connectivity=8,
+    )
+    veto = np.zeros(candidate_mask.shape, dtype=bool)
+    for label in range(1, candidate_count):
+        region = candidate_labels == label
+        if float(np.mean(boundary_band[region])) >= config.moon_shadow_min_component_boundary_fraction:
+            veto[region] = True
+    return veto
 
 
 def strong_edge_veto(
@@ -428,6 +719,7 @@ def write_candidate_preview(
     image: np.ndarray,
     candidate_mask: np.ndarray,
     support_mask: np.ndarray,
+    frame_diagnostics: DustFrameDiagnostics,
     *,
     preview_max_dim: int,
 ) -> None:
@@ -436,6 +728,7 @@ def write_candidate_preview(
     overlay[support_mask] = (0.65 * overlay[support_mask] + np.array([40, 80, 40])).astype(np.uint8)
     overlay[candidate_mask] = (40, 40, 255)
     preview = cv2.addWeighted(preview, 0.45, overlay, 0.55, 0)
+    draw_limb_overlays(preview, frame_diagnostics)
     if preview_max_dim > 0:
         height, width = preview.shape[:2]
         largest = max(width, height)
@@ -449,6 +742,42 @@ def write_candidate_preview(
     path.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(path), preview):
         raise RuntimeError(f"Could not write dust candidate preview: {path}")
+
+
+def draw_limb_overlays(preview: np.ndarray, frame_diagnostics: DustFrameDiagnostics) -> None:
+    sun_color = (0, 220, 255)
+    moon_color = (255, 220, 0)
+    if frame_diagnostics.sun_ellipse is not None:
+        draw_limb_ellipse(preview, frame_diagnostics.sun_ellipse, sun_color)
+    else:
+        draw_limb_circle(preview, frame_diagnostics.sun_circle, sun_color)
+    if frame_diagnostics.moon_circle is not None:
+        draw_limb_circle(preview, frame_diagnostics.moon_circle, moon_color)
+
+
+def draw_limb_circle(preview: np.ndarray, fit: LimbCircleFit, color: tuple[int, int, int]) -> None:
+    cv2.circle(
+        preview,
+        (int(round(fit.center_x)), int(round(fit.center_y))),
+        max(1, int(round(fit.radius))),
+        color,
+        2,
+        lineType=cv2.LINE_AA,
+    )
+
+
+def draw_limb_ellipse(preview: np.ndarray, fit: LimbEllipseFit, color: tuple[int, int, int]) -> None:
+    cv2.ellipse(
+        preview,
+        (int(round(fit.center_x)), int(round(fit.center_y))),
+        (max(1, int(round(fit.major_radius))), max(1, int(round(fit.minor_radius)))),
+        fit.angle_deg,
+        0,
+        360,
+        color,
+        2,
+        lineType=cv2.LINE_AA,
+    )
 
 
 def tone_preview(image: np.ndarray) -> np.ndarray:
