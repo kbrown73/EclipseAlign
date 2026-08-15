@@ -66,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="add a filled fitted-sun disk as the output alpha channel",
     )
+    add_dust_correction_args(render)
     add_polish_args(render)
 
     process = subparsers.add_parser("process", help="detect and render in one pass")
@@ -89,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="add a filled fitted-sun disk as the output alpha channel",
     )
+    add_dust_correction_args(process)
     add_polish_args(process)
 
     extract_video = subparsers.add_parser("extract-video", help="decode a video into an EXR frame sequence")
@@ -207,6 +209,30 @@ def add_polish_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_dust_correction_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--correct-dust",
+        action="store_true",
+        help="apply the sensor-fixed dust mask before alignment/rendering",
+    )
+    parser.add_argument(
+        "--dust-mask",
+        help="dust mask PNG to use with --correct-dust; defaults to dust/dust_mask.png next to metadata/diagnostics",
+    )
+    parser.add_argument(
+        "--dust-correction-radius",
+        type=float,
+        default=5.0,
+        help="inpaint radius in source pixels for --correct-dust",
+    )
+    parser.add_argument(
+        "--dust-mask-dilation",
+        type=int,
+        default=2,
+        help="source-pixel dilation applied to the dust mask before correction",
+    )
+
+
 def dust_config(args: argparse.Namespace) -> DustConfig:
     if args.dust_disk_radius <= 0:
         raise SystemExit("--dust-disk-radius must be greater than zero")
@@ -289,8 +315,21 @@ def preview_worker(payload: tuple[str, FrameDetection, DetectionConfig, str, int
     write_overlay_preview(input_path, preview_path, detection, config, max_dim=preview_max_dim)
 
 
-def render_worker(payload: tuple[str, str, FrameDetection, object, bool, bool]) -> bool:
-    input_path, output_path, detection, crop, apply_rotation, add_alpha_circle = payload
+RenderPayload = tuple[str, str, FrameDetection, object, bool, bool, str | None, float, int]
+
+
+def render_worker(payload: RenderPayload) -> bool:
+    (
+        input_path,
+        output_path,
+        detection,
+        crop,
+        apply_rotation,
+        add_alpha_circle,
+        dust_mask_path,
+        dust_correction_radius,
+        dust_mask_dilation,
+    ) = payload
     if detection.translation_x is None or detection.translation_y is None:
         return False
     render_frame(
@@ -300,6 +339,9 @@ def render_worker(payload: tuple[str, str, FrameDetection, object, bool, bool]) 
         crop=crop,
         apply_rotation=apply_rotation,
         add_alpha_circle=add_alpha_circle,
+        dust_mask_path=dust_mask_path,
+        dust_correction_radius=dust_correction_radius,
+        dust_mask_dilation=dust_mask_dilation,
     )
     return True
 
@@ -686,7 +728,10 @@ def build_render_payloads(
     *,
     reformat_output: bool,
     add_alpha_circle: bool,
-) -> tuple[list[tuple[str, str, FrameDetection, object, bool, bool]], int, dict[str, str]]:
+    dust_mask_path: Path | None = None,
+    dust_correction_radius: float = 5.0,
+    dust_mask_dilation: int = 2,
+) -> tuple[list[RenderPayload], int, dict[str, str]]:
     skipped = 0
     payloads = []
     output_name_by_source: dict[str, str] = {}
@@ -707,6 +752,9 @@ def build_render_payloads(
                 crop,
                 apply_rotation,
                 add_alpha_circle,
+                str(dust_mask_path) if dust_mask_path is not None else None,
+                dust_correction_radius,
+                dust_mask_dilation,
             )
         )
     return payloads, skipped, output_name_by_source
@@ -734,6 +782,24 @@ def maybe_polish_outputs(
     polish_results = polish_aligned_outputs(output_dir, detections, config=config)
     write_polish_summary(summary_path, polish_results)
     return sum(1 for result in polish_results if result.source == "phase_correlation")
+
+
+def resolve_dust_mask_path(args: argparse.Namespace, default_path: Path | None) -> Path | None:
+    if not args.correct_dust:
+        if args.dust_mask:
+            raise SystemExit("--dust-mask requires --correct-dust")
+        return None
+    if args.dust_correction_radius <= 0:
+        raise SystemExit("--dust-correction-radius must be greater than zero")
+    if args.dust_mask_dilation < 0:
+        raise SystemExit("--dust-mask-dilation must be zero or greater")
+
+    path = Path(args.dust_mask) if args.dust_mask else default_path
+    if path is None:
+        raise SystemExit("--correct-dust requires --dust-mask or a dust mask from --detect-dust")
+    if not path.exists():
+        raise SystemExit(f"Dust mask not found: {path}")
+    return path
 
 
 def load_metadata(path: str | Path) -> tuple[dict, list[FrameDetection]]:
@@ -976,6 +1042,10 @@ def render_command(args: argparse.Namespace) -> int:
     crop = resolve_crop(args, detections)
     apply_rotation = not args.no_rotation
     output_dir = Path(args.output)
+    dust_mask_path = resolve_dust_mask_path(
+        args,
+        Path(args.metadata).with_name("dust") / "dust_mask.png",
+    )
     payloads, skipped, output_name_by_source = build_render_payloads(
         inputs,
         by_name,
@@ -984,6 +1054,9 @@ def render_command(args: argparse.Namespace) -> int:
         apply_rotation,
         reformat_output=args.reformat_output,
         add_alpha_circle=args.alpha_circle,
+        dust_mask_path=dust_mask_path,
+        dust_correction_radius=args.dust_correction_radius,
+        dust_mask_dilation=args.dust_mask_dilation,
     )
     rendered = sum(
         1
@@ -1004,6 +1077,8 @@ def render_command(args: argparse.Namespace) -> int:
         print(f"Skipped {skipped} frames without usable metadata")
     if crop is not None:
         print(f"Crop: {crop.width}x{crop.height}+{crop.left}+{crop.top}")
+    if dust_mask_path is not None:
+        print(f"Dust correction mask: {dust_mask_path}")
     return 0
 
 
@@ -1064,6 +1139,10 @@ def process_command(args: argparse.Namespace) -> int:
             config=dust_config(args),
             preview_max_dim=args.preview_max_dim,
         )
+    dust_mask_path = resolve_dust_mask_path(
+        args,
+        dust_dir / "dust_mask.png" if args.detect_dust else None,
+    )
     crop = resolve_crop(args, detections)
     crop_data = crop.to_dict() if crop is not None else None
     document = metadata_document(args.input, detections, crop=crop_data)
@@ -1087,6 +1166,9 @@ def process_command(args: argparse.Namespace) -> int:
         True,
         reformat_output=args.reformat_output,
         add_alpha_circle=args.alpha_circle,
+        dust_mask_path=dust_mask_path,
+        dust_correction_radius=args.dust_correction_radius,
+        dust_mask_dilation=args.dust_mask_dilation,
     )
     rendered = sum(
         1
@@ -1118,6 +1200,8 @@ def process_command(args: argparse.Namespace) -> int:
     if dust_result is not None:
         print(f"Dust candidates: {len(dust_result.components)}")
         print(f"Dust diagnostics: {dust_dir}")
+    if dust_mask_path is not None:
+        print(f"Dust correction mask: {dust_mask_path}")
     print(f"Previews: {previews_dir}")
     if common_radius is not None:
         print(f"Common radius estimate: {common_radius:.2f}px")

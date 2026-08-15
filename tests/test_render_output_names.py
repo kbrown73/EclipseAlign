@@ -25,6 +25,9 @@ def test_build_render_payloads_reformats_rendered_outputs_continuously():
         True,
         reformat_output=True,
         add_alpha_circle=True,
+        dust_mask_path=Path("diagnostics/dust/dust_mask.png"),
+        dust_correction_radius=7.0,
+        dust_mask_dilation=3,
     )
 
     assert skipped == 1
@@ -33,6 +36,12 @@ def test_build_render_payloads_reformats_rendered_outputs_continuously():
         "aligned/frame_0002.exr",
     ]
     assert [payload[5] for payload in payloads] == [True, True]
+    assert [payload[6] for payload in payloads] == [
+        "diagnostics/dust/dust_mask.png",
+        "diagnostics/dust/dust_mask.png",
+    ]
+    assert [payload[7] for payload in payloads] == [7.0, 7.0]
+    assert [payload[8] for payload in payloads] == [3, 3]
     assert output_name_by_source == {
         "IMG_0001.exr": "frame_0001.exr",
         "IMG_0003.exr": "frame_0002.exr",

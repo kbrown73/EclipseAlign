@@ -8,6 +8,7 @@ from eclipse_align.cli import (
     horizon_ellipse_indexes,
     parse_plausible_raw_ranges,
     plausible_raw_indexes,
+    resolve_dust_mask_path,
     resolve_preview_jobs,
 )
 from eclipse_align.detect import DEFAULT_THRESHOLD, DetectionConfig, EllipseFit
@@ -108,6 +109,52 @@ def test_horizon_ellipse_range_cli_accepts_comma_separated_range_list():
     )
 
     assert args.horizon_ellipse_range == ["1225-1300,2000-2100,3720+"]
+
+
+def test_render_correct_dust_cli_options():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "render",
+            "--input",
+            "frames/*.exr",
+            "--metadata",
+            "diagnostics/detections.json",
+            "--output",
+            "aligned",
+            "--correct-dust",
+            "--dust-correction-radius",
+            "7",
+            "--dust-mask-dilation",
+            "3",
+        ]
+    )
+
+    assert args.correct_dust
+    assert args.dust_correction_radius == 7
+    assert args.dust_mask_dilation == 3
+
+
+def test_resolve_dust_mask_path_requires_correct_dust(tmp_path):
+    mask = tmp_path / "dust_mask.png"
+    mask.write_bytes(b"not-an-image-but-existing")
+    args = Namespace(correct_dust=False, dust_mask=str(mask), dust_correction_radius=5.0, dust_mask_dilation=2)
+
+    try:
+        resolve_dust_mask_path(args, None)
+    except SystemExit as exc:
+        assert "--dust-mask requires --correct-dust" in str(exc)
+    else:
+        raise AssertionError("Expected --dust-mask without --correct-dust to fail")
+
+
+def test_resolve_dust_mask_path_uses_default_when_correcting(tmp_path):
+    mask = tmp_path / "dust_mask.png"
+    mask.write_bytes(b"not-an-image-but-existing")
+    args = Namespace(correct_dust=True, dust_mask=None, dust_correction_radius=5.0, dust_mask_dilation=2)
+
+    assert resolve_dust_mask_path(args, mask) == mask
 
 
 def test_plausible_raw_range_implies_preference_for_ranges():

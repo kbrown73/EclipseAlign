@@ -163,7 +163,7 @@ After rendering, you can apply a bounded residual translation polish pass:
 
 ## Dust Diagnostics
 
-Write sensor-fixed dust candidate diagnostics without changing rendered pixels:
+Write sensor-fixed dust candidate diagnostics:
 
 ```bash
 /usr/bin/python3 -m eclipse_align process \
@@ -183,6 +183,34 @@ Dust diagnostics are written to `diagnostics/dust/`:
   coordinates.
 - `dust_mask.png`: area-filtered candidate mask.
 - `candidates/*.png`: per-frame candidate overlays for visual inspection.
+
+Add `--correct-dust` to apply `dust_mask.png` before alignment/rendering. In a
+single `process` run, use it with `--detect-dust`:
+
+```bash
+/usr/bin/python3 -m eclipse_align process \
+  --input "path/to/*.exr" \
+  --output aligned \
+  --diagnostics diagnostics \
+  --crop \
+  --margin 80 \
+  --detect-dust \
+  --correct-dust \
+  --jobs 4
+```
+
+When rendering from existing metadata, `--correct-dust` uses `dust/dust_mask.png`
+next to the metadata by default, or an explicit mask path:
+
+```bash
+/usr/bin/python3 -m eclipse_align render \
+  --input "path/to/*.exr" \
+  --metadata diagnostics/detections.json \
+  --output aligned \
+  --correct-dust \
+  --dust-mask diagnostics/dust/dust_mask.png \
+  --jobs 4
+```
 
 The default dust pass now inspects out to `1.03x` the fitted solar radius so
 spots near the limb are included. To push detection further while reviewing
