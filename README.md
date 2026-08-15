@@ -1,6 +1,6 @@
 # Solar Eclipse Timelapse Aligner
 
-Command-line tools for aligning OpenEXR solar eclipse timelapse frames.
+Command-line tool for aligning OpenEXR solar eclipse timelapse frames.
 
 The pipeline detects the eclipse center in each frame, writes metadata and
 diagnostic previews, then renders aligned EXR masters for later grading or video
@@ -8,6 +8,11 @@ assembly. The original input frames are never modified.
 
 Frames with clipped or uncertain detections are still recorded in the metadata
 and diagnostics so they can be reviewed before rendering.
+
+Dust detection/correction and the post-render alignment polish pass are
+experimental. They are useful for inspection and targeted tests, but their
+results should be reviewed frame-by-frame before relying on them for a final
+render.
 
 ## Requirements
 
@@ -38,6 +43,8 @@ result, and render aligned frames:
 ```
 
 This writes aligned EXR frames to `aligned/` and diagnostics to `diagnostics/`.
+`process` also writes `diagnostics/detections.json` and diagnostic preview PNGs
+to `diagnostics/previews/`.
 
 ## Video Input
 
@@ -103,7 +110,8 @@ for already-debayered or display-referred video.
 
 The extractor writes FLOAT EXRs for decoded `uint16` frames to avoid losing
 precision, and HALF EXRs otherwise. You can override this with
-`--output-format` or `--exr-pixel-type`.
+`--output-format` or `--exr-pixel-type`. Use `--digits` to change the number of
+digits in extracted frame names.
 
 ## Two-Step Workflow
 
@@ -128,11 +136,17 @@ metadata, or reviewing previews before rendering the final frames:
 
 ## Useful Options
 
+- Set `--jobs 0` to use all CPUs. Preview and rotation registration workers keep
+  a small amount of headroom by default because they read full-resolution EXRs.
 - Add `--reformat-output` to `render` or `process` to write continuous sequence
   names such as `frame_0001.exr`, `frame_0002.exr`, starting from the first
   rendered frame.
 - Add `--alpha-circle` to `render` or `process` to add the fitted solar disk as
   a filled white alpha channel in each rendered EXR.
+- Use `--manual-crop WxH+X+Y` on `render` or `process` for an explicit crop
+  rectangle. Use either `--crop` or `--manual-crop`, not both.
+- Use `--preview-max-dim 0` on `detect` or `process` to write full-resolution
+  diagnostic preview PNGs, or set a positive pixel limit to resize previews.
 - Use `--threshold` to tune where the normalized bright-limb mask is traced.
   Lower values fit a larger disk on soft-limb frames; the default is `0.08`.
 - Add `--prefer-plausible-raw` to `detect` or `process` only after reviewing
@@ -166,9 +180,16 @@ around each reframe boundary to refine the correction.
 When rotation detection is enabled, `diagnostics/rotation_summary.csv` records
 one graphable row per reframe boundary.
 
-## Alignment Polish
+Use `--rotation-jump-threshold` to adjust how large a center jump must be before
+it is treated as a reframe boundary. Use `--rotation-jobs` when rotation
+registration should use a different worker count than the main detection pass.
 
-After rendering, you can apply a bounded residual translation polish pass:
+## Alignment Polish (EXPERIMENTAL)
+
+Experimental: after rendering, you can apply a bounded residual translation
+polish pass. This rewrites the rendered EXRs in place and records accepted,
+rejected, or skipped per-frame corrections in `polish_summary.csv`. It is not
+yet reliable enough to use without visual review.
 
 ```bash
 /usr/bin/python3 -m eclipse_align process \
@@ -182,9 +203,16 @@ After rendering, you can apply a bounded residual translation polish pass:
   --jobs 4
 ```
 
-## Dust Diagnostics
+The default maximum correction is 2 pixels. Use `--polish-max-shift` to tighten
+or loosen that bound.
 
-Write sensor-fixed dust candidate diagnostics:
+## Dust Diagnostics And Correction (EXPERIMENTAL)
+
+Experimental: write sensor-fixed dust candidate diagnostics. This pass looks
+for repeated dark local-contrast hits in camera coordinates and tries to veto
+solar-limb, moon-limb, moon-shadow, and frame-edge false positives. The
+heuristics still need visual review and can miss real dust or flag eclipse
+features.
 
 ```bash
 /usr/bin/python3 -m eclipse_align process \
@@ -205,8 +233,10 @@ Dust diagnostics are written to `diagnostics/dust/`:
 - `dust_mask.png`: area-filtered candidate mask.
 - `candidates/*.png`: per-frame candidate overlays for visual inspection.
 
-Add `--correct-dust` to apply `dust_mask.png` before alignment/rendering. In a
-single `process` run, use it with `--detect-dust`:
+Add `--correct-dust` to apply `dust_mask.png` before alignment/rendering. This
+correction is also experimental: it inpaints only inside the fitted solar disk,
+using the sensor-fixed mask, and should be checked against the original frames.
+In a single `process` run, use it with `--detect-dust`:
 
 ```bash
 /usr/bin/python3 -m eclipse_align process \
@@ -219,6 +249,8 @@ single `process` run, use it with `--detect-dust`:
   --correct-dust \
   --jobs 4
 ```
+
+Tune correction with `--dust-correction-radius` and `--dust-mask-dilation`.
 
 When rendering from existing metadata, `--correct-dust` uses `dust/dust_mask.png`
 next to the metadata by default, or an explicit mask path:
@@ -234,8 +266,9 @@ next to the metadata by default, or an explicit mask path:
 ```
 
 The default dust pass now inspects out to `1.03x` the fitted solar radius so
-spots near the limb are included. To push detection further while reviewing
-diagnostics, lower the repeated-hit threshold:
+spots near the limb are included. Use `--dust-disk-radius` to change that
+inspection radius. To push detection further while reviewing diagnostics, lower
+the repeated-hit threshold:
 
 ```bash
 /usr/bin/python3 -m eclipse_align detect \
