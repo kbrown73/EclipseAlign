@@ -10,10 +10,13 @@ from .exr_io import read_exr
 from .models import FrameDetection
 
 
+DEFAULT_THRESHOLD = 0.08
+
+
 @dataclass
 class DetectionConfig:
     work_max_dim: int = 1400
-    threshold: float = 0.18
+    threshold: float = DEFAULT_THRESHOLD
     low_percentile: float = 50.0
     high_percentile: float = 99.95
     min_component_area_fraction: float = 0.00002

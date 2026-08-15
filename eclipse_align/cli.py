@@ -17,7 +17,7 @@ import astroio
 from astroio.exr import write_exr as write_astroio_exr
 from tqdm import tqdm
 
-from .detect import DetectionConfig, EllipseFit, detect_file, fit_horizon_ellipse_file
+from .detect import DEFAULT_THRESHOLD, DetectionConfig, EllipseFit, detect_file, fit_horizon_ellipse_file
 from .diagnostics import write_overlay_preview
 from .dust import DustConfig, DustDetectionResult, analyze_dust_inputs
 from .files import discover_inputs
@@ -125,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
 def add_detection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input", required=True, help="input glob or directory")
     parser.add_argument("--work-max-dim", type=int, default=1400, help="max dimension for detection pass")
-    parser.add_argument("--threshold", type=float, default=0.18, help="normalized bright mask threshold")
+    parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="normalized bright mask threshold")
     parser.add_argument("--jobs", type=int, default=1, help="parallel worker processes; use 0 for all CPUs")
     parser.add_argument("--detect-rotation", action="store_true", help="estimate one roll correction per reframe segment")
     parser.add_argument("--detect-dust", action="store_true", help="write sensor-fixed dust candidate diagnostics")

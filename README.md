@@ -112,6 +112,8 @@ metadata, or reviewing previews before rendering the final frames:
   rendered frame.
 - Add `--alpha-circle` to `render` or `process` to add the fitted solar disk as
   a filled white alpha channel in each rendered EXR.
+- Use `--threshold` to tune where the normalized bright-limb mask is traced.
+  Lower values fit a larger disk on soft-limb frames; the default is `0.08`.
 - Add `--prefer-plausible-raw` to `detect` or `process` only after reviewing
   diagnostics when the raw pre-refinement fit is better than interpolation in
   obstructed frames. Use `--plausible-raw-range 1225-1300,2000-2100,3720+`

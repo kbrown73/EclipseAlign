@@ -10,7 +10,7 @@ from eclipse_align.cli import (
     plausible_raw_indexes,
     resolve_preview_jobs,
 )
-from eclipse_align.detect import DetectionConfig, EllipseFit
+from eclipse_align.detect import DEFAULT_THRESHOLD, DetectionConfig, EllipseFit
 from eclipse_align.models import FrameDetection
 
 
@@ -24,6 +24,23 @@ def test_resolve_preview_jobs_keeps_single_worker_floor():
     args = Namespace(jobs=2)
 
     assert resolve_preview_jobs(args) == 1
+
+
+def test_detection_cli_threshold_defaults_to_detector_default():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "detect",
+            "--input",
+            "frames/*.exr",
+            "--metadata",
+            "diagnostics/detections.json",
+        ]
+    )
+
+    assert args.threshold == DEFAULT_THRESHOLD
+    assert DetectionConfig().threshold == DEFAULT_THRESHOLD
 
 
 def test_extract_video_input_accepts_repeated_and_multiple_values():
