@@ -61,6 +61,25 @@ def test_extract_video_input_accepts_repeated_and_multiple_values():
     )
 
     assert args.input == [["first.mp4"], ["second.mp4", "third.mp4"]]
+    assert args.debayer == "auto"
+
+
+def test_extract_video_debayer_accepts_manual_bayer_pattern():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "extract-video",
+            "--input",
+            "raw.avi",
+            "--output",
+            "frames",
+            "--debayer",
+            "GRBG",
+        ]
+    )
+
+    assert args.debayer == "GRBG"
 
 
 def test_plausible_raw_range_parses_repeated_and_comma_values():

@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 import av
 import OpenImageIO as oiio
+import pytest
+from astroio import UnsupportedPixelFormatError
 
 from eclipse_align.cli import (
     exr_half_for_video_frame,
@@ -76,7 +78,7 @@ def test_extract_video_frames_writes_exr_sequence(tmp_path):
     output_dir = tmp_path / "frames"
     write_test_mp4(video_path, frame_count=3)
 
-    count = extract_video_frames(video_path, output_dir, digits=4)
+    count = extract_video_frames(video_path, output_dir, debayer="none", digits=4)
 
     outputs = sorted(output_dir.glob("*.exr"))
     assert count == 3
@@ -92,6 +94,28 @@ def test_extract_video_frames_writes_exr_sequence(tmp_path):
     assert float(frame.max()) <= 1.0
 
 
+def test_extract_video_frames_accepts_manual_debayer(tmp_path):
+    video_path = tmp_path / "clip.mp4"
+    output_dir = tmp_path / "frames"
+    write_test_mp4(video_path, frame_count=1)
+
+    count = extract_video_frames(video_path, output_dir, debayer="GRBG", digits=4)
+
+    output = output_dir / "frame_0001.exr"
+    assert count == 1
+    assert output.exists()
+    assert read_exr(output).shape == (3, 4, 3)
+
+
+def test_extract_video_frames_auto_debayer_fails_without_bayer_metadata(tmp_path):
+    video_path = tmp_path / "clip.mp4"
+    output_dir = tmp_path / "frames"
+    write_test_mp4(video_path, frame_count=1)
+
+    with pytest.raises(UnsupportedPixelFormatError):
+        extract_video_frames(video_path, output_dir, debayer="auto", digits=4)
+
+
 def test_extract_video_frames_concatenates_multiple_inputs(tmp_path):
     first_video = tmp_path / "first.mp4"
     second_video = tmp_path / "second.mp4"
@@ -99,7 +123,7 @@ def test_extract_video_frames_concatenates_multiple_inputs(tmp_path):
     write_test_mp4(first_video, frame_count=2)
     write_test_mp4(second_video, frame_count=3)
 
-    count = extract_video_frames([first_video, second_video], output_dir, digits=4)
+    count = extract_video_frames([first_video, second_video], output_dir, debayer="none", digits=4)
 
     outputs = sorted(output_dir.glob("*.exr"))
     assert count == 5

@@ -47,7 +47,8 @@ video to EXR frames first, then run the normal EXR workflow:
 ```bash
 /usr/bin/python3 -m eclipse_align extract-video \
   --input "path/to/eclipse.mp4" \
-  --output extracted_frames
+  --output extracted_frames \
+  --debayer none
 
 /usr/bin/python3 -m eclipse_align process \
   --input "extracted_frames/*.exr" \
@@ -66,11 +67,13 @@ by multiple paths:
 /usr/bin/python3 -m eclipse_align extract-video \
   --input "path/to/video1.mp4" \
   --input "path/to/video2.mp4" \
-  --output extracted_frames
+  --output extracted_frames \
+  --debayer none
 
 /usr/bin/python3 -m eclipse_align extract-video \
   --input "path/to/video1.mp4" "path/to/video2.mp4" \
-  --output extracted_frames
+  --output extracted_frames \
+  --debayer none
 ```
 
 By default, AstroIO chooses the decoded video precision automatically: 8-bit
@@ -79,6 +82,24 @@ sources are decoded as `rgb24`, while higher bit-depth sources are decoded as
 values and applies `--transfer srgb` by default so normal display-referred video
 is written as linear EXR data. Use `--transfer none` to write scaled but
 non-linear encoded RGB values.
+
+Raw Bayer video can be debayered during extraction:
+
+```bash
+/usr/bin/python3 -m eclipse_align extract-video \
+  --input "jpaana/2026-07-17-151401-Solar-RAW.avi" \
+  --output extracted_frames \
+  --debayer GRBG \
+  --transfer none
+```
+
+`--debayer auto` is the default for `extract-video` and uses Bayer metadata
+when the video decoder reports an explicit Bayer pixel format. If no Bayer
+metadata is available, `auto` fails instead of silently writing non-debayered
+frames. Some raw AVI files, including the example above, are reported as
+generic `pal8` raw video, so pass the sensor pattern explicitly. Accepted
+manual patterns are `RGGB`, `BGGR`, `GBRG`, and `GRBG`; use `--debayer none`
+for already-debayered or display-referred video.
 
 The extractor writes FLOAT EXRs for decoded `uint16` frames to avoid losing
 precision, and HALF EXRs otherwise. You can override this with

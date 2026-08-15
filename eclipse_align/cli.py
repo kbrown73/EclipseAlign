@@ -108,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="AstroIO video decode format: auto, rgb24, rgb48le, gray, or gray16le",
     )
     extract_video.add_argument(
+        "--debayer",
+        default="auto",
+        help="debayer raw Bayer video frames: auto, none, RGGB, BGGR, GBRG, or GRBG",
+    )
+    extract_video.add_argument(
         "--exr-pixel-type",
         choices=("auto", "half", "float"),
         default="auto",
@@ -693,6 +698,7 @@ def extract_video_frames(
     output_dir: str | Path,
     *,
     output_format: str = "auto",
+    debayer: str = "auto",
     exr_pixel_type: str = "auto",
     transfer: str = "srgb",
     digits: int = 6,
@@ -704,7 +710,7 @@ def extract_video_frames(
     total_count = 0
     for path in input_paths:
         desc = "extract-video" if len(input_paths) == 1 else f"extract-video {path.name}"
-        with astroio.open_reader(path, output_format=output_format) as reader:
+        with astroio.open_reader(path, output_format=output_format, debayer=debayer) as reader:
             written = 0
             for frame in tqdm(reader, total=reader.frame_count, desc=desc):
                 output_path = output_dir / video_frame_filename(frame_number, digits=digits)
@@ -1211,14 +1217,18 @@ def process_command(args: argparse.Namespace) -> int:
 
 
 def extract_video_command(args: argparse.Namespace) -> int:
-    count = extract_video_frames(
-        args.input,
-        args.output,
-        output_format=args.output_format,
-        exr_pixel_type=args.exr_pixel_type,
-        transfer=args.transfer,
-        digits=args.digits,
-    )
+    try:
+        count = extract_video_frames(
+            args.input,
+            args.output,
+            output_format=args.output_format,
+            debayer=args.debayer,
+            exr_pixel_type=args.exr_pixel_type,
+            transfer=args.transfer,
+            digits=args.digits,
+        )
+    except astroio.UnsupportedPixelFormatError as exc:
+        raise SystemExit(str(exc)) from exc
     print(f"Extracted {count} frames to {Path(args.output)}")
     return 0
 
