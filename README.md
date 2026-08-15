@@ -114,8 +114,13 @@ metadata, or reviewing previews before rendering the final frames:
   a filled white alpha channel in each rendered EXR.
 - Add `--prefer-plausible-raw` to `detect` or `process` only after reviewing
   diagnostics when the raw pre-refinement fit is better than interpolation in
-  obstructed frames. Use `--plausible-raw-range 1225-1300,3720-4461` to limit
-  that behavior to reviewed 1-based frame ranges.
+  obstructed frames. Use `--plausible-raw-range 1225-1300,2000-2100,3720+`
+  to limit that behavior to reviewed 1-based frame ranges. A suffix like
+  `3720+` means frame 3720 through the final input frame.
+- Add `--horizon-ellipse-range 1225-1300,2000-2100,3720+` to `detect` or `process`
+  for reviewed sunset/horizon ranges where the apparent solar disk is visibly
+  flattened. Accepted fits are gated by ellipse residual, support, tilt, radius,
+  and center drift, then recorded with `horizon_ellipse_fit`.
 
 ## Rotation Correction
 

@@ -165,3 +165,23 @@ def test_add_circle_alpha_replaces_existing_alpha_channel():
     assert output.shape == (5, 5, 4)
     assert output[2, 2, 3] == 1
     assert output[0, 0, 3] == 0
+
+
+def test_add_circle_alpha_uses_accepted_ellipse_metadata():
+    import numpy as np
+
+    image = np.zeros((9, 9, 3), dtype=np.float32)
+    detection = FrameDetection(
+        "a.exr",
+        9,
+        9,
+        radius=4,
+        ellipse_major_radius=3,
+        ellipse_minor_radius=1,
+        ellipse_angle_deg=0,
+    )
+
+    output = add_circle_alpha(image, detection)
+
+    assert output[4, 7, 3] == 1
+    assert output[6, 5, 3] == 0

@@ -16,6 +16,7 @@ COLOR_FINAL_FAILED = (0, 0, 255)
 COLOR_FINAL_CLIPPED = (0, 180, 255)
 COLOR_RAW = (255, 80, 40)
 COLOR_DRIFT = (255, 120, 255)
+COLOR_ELLIPSE = (255, 220, 40)
 COLOR_TEXT = (255, 255, 255)
 
 
@@ -77,7 +78,17 @@ def draw_final_fit(preview: np.ndarray, detection: FrameDetection, scale: float)
         return
     center = scaled_point(detection.center_x, detection.center_y, scale)
     color = status_color(detection)
-    if detection.radius is not None:
+    if (
+        detection.ellipse_major_radius is not None
+        and detection.ellipse_minor_radius is not None
+        and detection.ellipse_angle_deg is not None
+    ):
+        axes = (
+            int(round(detection.ellipse_major_radius * scale)),
+            int(round(detection.ellipse_minor_radius * scale)),
+        )
+        cv2.ellipse(preview, center, axes, detection.ellipse_angle_deg, 0, 360, COLOR_ELLIPSE, 2)
+    elif detection.radius is not None:
         cv2.circle(preview, center, int(round(detection.radius * scale)), color, 2)
     cv2.drawMarker(preview, center, color, markerType=cv2.MARKER_CROSS, markerSize=24, thickness=2)
 
@@ -105,6 +116,10 @@ def detection_label_lines(detection: FrameDetection) -> list[str]:
         quality.append(f"med={detection.circle_residual_median_px:.1f}px")
     if detection.limb_support_fraction is not None:
         quality.append(f"support={detection.limb_support_fraction:.2f}")
+    if detection.ellipse_residual_median_px is not None:
+        quality.append(f"ell-med={detection.ellipse_residual_median_px:.1f}px")
+    if detection.ellipse_support_fraction is not None:
+        quality.append(f"ell-support={detection.ellipse_support_fraction:.2f}")
     if detection.raw_center_x is not None and detection.raw_center_y is not None and detection.has_center:
         drift = np.hypot(detection.raw_center_x - detection.center_x, detection.raw_center_y - detection.center_y)
         if drift >= 1.0:
@@ -146,6 +161,7 @@ def draw_legend(preview: np.ndarray) -> None:
         ("clipped", COLOR_FINAL_CLIPPED),
         ("failed", COLOR_FINAL_FAILED),
         ("raw pre-refine", COLOR_RAW),
+        ("horizon ellipse", COLOR_ELLIPSE),
         ("final -> raw", COLOR_DRIFT),
     ]
     x = 16

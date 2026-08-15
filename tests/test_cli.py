@@ -1,12 +1,16 @@
 from argparse import Namespace
+from pathlib import Path
 
 from eclipse_align.cli import (
+    apply_horizon_ellipse_overrides,
     apply_plausible_raw_overrides,
     build_parser,
+    horizon_ellipse_indexes,
     parse_plausible_raw_ranges,
     plausible_raw_indexes,
     resolve_preview_jobs,
 )
+from eclipse_align.detect import DetectionConfig, EllipseFit
 from eclipse_align.models import FrameDetection
 
 
@@ -47,6 +51,12 @@ def test_plausible_raw_range_parses_repeated_and_comma_values():
     assert indexes == {1, 2, 3, 6, 8, 9}
 
 
+def test_plausible_raw_range_parses_open_ended_suffix():
+    indexes = parse_plausible_raw_ranges(["2-4,7+"], 10)
+
+    assert indexes == {1, 2, 3, 6, 7, 8, 9}
+
+
 def test_plausible_raw_range_cli_accepts_comma_separated_range_list():
     parser = build_parser()
 
@@ -58,17 +68,41 @@ def test_plausible_raw_range_cli_accepts_comma_separated_range_list():
             "--metadata",
             "diagnostics/detections.json",
             "--plausible-raw-range",
-            "1225-1300,3720-4461",
+            "1225-1300,2000-2100,3720+",
         ]
     )
 
-    assert args.plausible_raw_range == ["1225-1300,3720-4461"]
+    assert args.plausible_raw_range == ["1225-1300,2000-2100,3720+"]
+
+
+def test_horizon_ellipse_range_cli_accepts_comma_separated_range_list():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "detect",
+            "--input",
+            "frames/*.exr",
+            "--metadata",
+            "diagnostics/detections.json",
+            "--horizon-ellipse-range",
+            "1225-1300,2000-2100,3720+",
+        ]
+    )
+
+    assert args.horizon_ellipse_range == ["1225-1300,2000-2100,3720+"]
 
 
 def test_plausible_raw_range_implies_preference_for_ranges():
     args = Namespace(prefer_plausible_raw=False, plausible_raw_range=["3-5"])
 
     assert plausible_raw_indexes(args, 10) == {2, 3, 4}
+
+
+def test_horizon_ellipse_indexes_use_explicit_ranges():
+    args = Namespace(horizon_ellipse_range=["2-3,6+"])
+
+    assert horizon_ellipse_indexes(args, 8) == {1, 2, 5, 6, 7}
 
 
 def test_prefer_plausible_raw_selects_all_frames_without_ranges():
@@ -134,3 +168,54 @@ def test_apply_plausible_raw_overrides_rejects_high_residual_fit():
     assert applied == 0
     assert detections[0].center_x == 50
     assert "raw_fit_override" not in detections[0].flags
+
+
+def test_apply_horizon_ellipse_overrides_uses_guarded_fit(monkeypatch):
+    detections = [
+        FrameDetection(
+            "a.exr",
+            100,
+            100,
+            center_x=50,
+            center_y=50,
+            radius=20,
+            confidence=0.25,
+            status="estimated",
+            flags=["distorted_limb_suspected", "interpolated"],
+            limb_support_fraction=0.35,
+            circle_residual_median_px=12,
+        )
+    ]
+
+    ellipse = EllipseFit(
+        center_x=47,
+        center_y=52,
+        major_radius=21,
+        minor_radius=17,
+        angle_deg=1,
+        confidence=0.8,
+        residual_median_px=4,
+        residual_p90_px=6,
+        support_fraction=0.9,
+    )
+
+    monkeypatch.setattr("eclipse_align.cli.parallel_map_ordered", lambda fn, items, jobs, desc: [ellipse])
+
+    applied = apply_horizon_ellipse_overrides(
+        [Path("a.exr")],
+        detections,
+        {0},
+        DetectionConfig(),
+        20,
+        jobs=1,
+    )
+
+    assert applied == 1
+    assert detections[0].center_x == 47
+    assert detections[0].center_y == 52
+    assert detections[0].radius == 21
+    assert detections[0].ellipse_minor_radius == 17
+    assert detections[0].translation_x == 3
+    assert detections[0].translation_y == -2
+    assert "horizon_ellipse_fit" in detections[0].flags
+    assert "interpolated" not in detections[0].flags

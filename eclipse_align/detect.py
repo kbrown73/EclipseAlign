@@ -24,6 +24,23 @@ class DetectionConfig:
     seed: int = 1234
     distorted_limb_median_px: float = 6.0
     distorted_limb_support_fraction: float = 0.52
+    max_ellipse_axis_ratio: float = 1.40
+    max_ellipse_tilt_deg: float = 28.0
+    min_ellipse_improvement: float = 0.20
+    max_ellipse_median_residual_px: float = 18.0
+
+
+@dataclass
+class EllipseFit:
+    center_x: float
+    center_y: float
+    major_radius: float
+    minor_radius: float
+    angle_deg: float
+    confidence: float
+    residual_median_px: float
+    residual_p90_px: float
+    support_fraction: float
 
 
 def luminance(image: np.ndarray) -> np.ndarray:
@@ -183,6 +200,128 @@ def robust_circle_fit(
     return cx, cy, radius, float(confidence)
 
 
+def normalize_ellipse_angle(angle_deg: float) -> float:
+    return float(((angle_deg + 90.0) % 180.0) - 90.0)
+
+
+def ellipse_from_points(
+    points: np.ndarray,
+    config: DetectionConfig,
+    expected_radius: float | None = None,
+) -> tuple[float, float, float, float, float] | None:
+    if len(points) < 5:
+        return None
+    try:
+        (cx, cy), (width, height), angle = cv2.fitEllipse(points.astype(np.float32).reshape(-1, 1, 2))
+    except cv2.error:
+        return None
+
+    if not all(np.isfinite(value) for value in (cx, cy, width, height, angle)):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+
+    if width >= height:
+        major_radius = width / 2.0
+        minor_radius = height / 2.0
+        major_angle = angle
+    else:
+        major_radius = height / 2.0
+        minor_radius = width / 2.0
+        major_angle = angle + 90.0
+
+    if major_radius <= 0 or minor_radius <= 0:
+        return None
+    axis_ratio = major_radius / max(minor_radius, 1e-9)
+    if axis_ratio > config.max_ellipse_axis_ratio:
+        return None
+    if expected_radius is not None:
+        radius_error = abs(major_radius - expected_radius) / max(expected_radius, 1.0)
+        if radius_error > 0.40:
+            return None
+
+    major_angle = normalize_ellipse_angle(major_angle)
+    if abs(major_angle) > config.max_ellipse_tilt_deg:
+        return None
+
+    return float(cx), float(cy), float(major_radius), float(minor_radius), major_angle
+
+
+def ellipse_radial_residuals(points: np.ndarray, ellipse: tuple[float, float, float, float, float]) -> np.ndarray:
+    cx, cy, major_radius, minor_radius, angle_deg = ellipse
+    angle = np.deg2rad(angle_deg)
+    cos_a = np.cos(angle)
+    sin_a = np.sin(angle)
+    dx = points[:, 0].astype(np.float64) - cx
+    dy = points[:, 1].astype(np.float64) - cy
+    major_coord = dx * cos_a + dy * sin_a
+    minor_coord = -dx * sin_a + dy * cos_a
+    point_radius = np.hypot(major_coord, minor_coord)
+    theta = np.arctan2(minor_coord, major_coord)
+    boundary_radius = 1.0 / np.sqrt(
+        (np.cos(theta) / major_radius) ** 2 + (np.sin(theta) / minor_radius) ** 2
+    )
+    return np.abs(point_radius - boundary_radius)
+
+
+def robust_ellipse_fit(
+    points: np.ndarray,
+    config: DetectionConfig,
+    expected_radius: float | None = None,
+) -> EllipseFit | None:
+    if len(points) < max(config.min_limb_points, 5):
+        return None
+    if len(points) > config.max_edge_points:
+        step = max(1, len(points) // config.max_edge_points)
+        points = points[::step]
+
+    rng = np.random.default_rng(config.seed)
+    best: tuple[int, tuple[float, float, float, float, float], np.ndarray] | None = None
+
+    for _ in range(config.ransac_iterations):
+        idx = rng.choice(len(points), 5, replace=False)
+        ellipse = ellipse_from_points(points[idx], config, expected_radius=expected_radius)
+        if ellipse is None:
+            continue
+        residuals = ellipse_radial_residuals(points, ellipse)
+        tolerance = max(2.0, ellipse[2] * config.ransac_tolerance_fraction)
+        inliers = residuals <= tolerance
+        score = int(np.count_nonzero(inliers))
+        if best is None or score > best[0]:
+            best = (score, ellipse, inliers)
+
+    if best is None:
+        ellipse = ellipse_from_points(points, config, expected_radius=expected_radius)
+        if ellipse is None:
+            return None
+        score = min(len(points), config.min_limb_points * 2)
+    else:
+        score, ellipse, inliers = best
+        inlier_points = points[inliers]
+        if len(inlier_points) >= 5:
+            refined = ellipse_from_points(inlier_points, config, expected_radius=expected_radius)
+            if refined is not None:
+                ellipse = refined
+
+    residuals = ellipse_radial_residuals(points, ellipse)
+    tolerance = max(2.0, ellipse[2] * config.ransac_tolerance_fraction)
+    support_fraction = float(np.mean(residuals <= tolerance))
+    residual_median_px = float(np.median(residuals))
+    residual_p90_px = float(np.percentile(residuals, 90))
+    confidence = min(1.0, score / max(len(points) * 0.35, 1.0))
+    return EllipseFit(
+        center_x=ellipse[0],
+        center_y=ellipse[1],
+        major_radius=ellipse[2],
+        minor_radius=ellipse[3],
+        angle_deg=ellipse[4],
+        confidence=float(confidence),
+        residual_median_px=residual_median_px,
+        residual_p90_px=residual_p90_px,
+        support_fraction=support_fraction,
+    )
+
+
 def contour_points(component_mask: np.ndarray) -> np.ndarray:
     contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
@@ -309,6 +448,49 @@ def detect_image(
         circle_residual_median_px=residual_median_px,
         circle_residual_p90_px=residual_p90_px,
     )
+
+
+def fit_horizon_ellipse_image(
+    image: np.ndarray,
+    config: DetectionConfig | None = None,
+    expected_radius: float | None = None,
+) -> EllipseFit | None:
+    config = config or DetectionConfig()
+    work_image, scale = downsample_for_detection(image, config.work_max_dim)
+    normalized = normalize_luminance(luminance(work_image), config)
+    mask = make_mask(normalized, config)
+    component = largest_plausible_component(mask, config)
+    if component is None:
+        return None
+
+    points = contour_points(component)
+    edge_margin = max(2, int(round(4 * scale)))
+    fit_points = limb_fit_points(points, component.shape, edge_margin, config)
+    scaled_expected = expected_radius * scale if expected_radius is not None else None
+    fit = robust_ellipse_fit(fit_points, config, expected_radius=scaled_expected)
+    if fit is None:
+        return None
+
+    return EllipseFit(
+        center_x=fit.center_x / scale,
+        center_y=fit.center_y / scale,
+        major_radius=fit.major_radius / scale,
+        minor_radius=fit.minor_radius / scale,
+        angle_deg=fit.angle_deg,
+        confidence=fit.confidence,
+        residual_median_px=fit.residual_median_px / scale,
+        residual_p90_px=fit.residual_p90_px / scale,
+        support_fraction=fit.support_fraction,
+    )
+
+
+def fit_horizon_ellipse_file(
+    path: str | Path,
+    config: DetectionConfig | None = None,
+    expected_radius: float | None = None,
+) -> EllipseFit | None:
+    image = read_exr(path)
+    return fit_horizon_ellipse_image(image, config, expected_radius=expected_radius)
 
 
 def detect_file(

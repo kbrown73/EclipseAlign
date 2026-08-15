@@ -1,6 +1,12 @@
 import numpy as np
 
-from eclipse_align.detect import DetectionConfig, adjusted_circle_confidence, detect_image, robust_circle_fit
+from eclipse_align.detect import (
+    DetectionConfig,
+    adjusted_circle_confidence,
+    detect_image,
+    robust_circle_fit,
+    robust_ellipse_fit,
+)
 
 
 def test_robust_circle_fit_recovers_circle_with_outliers():
@@ -17,6 +23,23 @@ def test_robust_circle_fit_recovers_circle_with_outliers():
     assert abs(cy - 80.0) < 1.0
     assert abs(radius - 40.0) < 1.0
     assert confidence > 0.9
+
+
+def test_robust_ellipse_fit_recovers_flattened_horizontal_disk_with_outliers():
+    angles = np.linspace(0.0, 2.0 * np.pi, 280, endpoint=False)
+    ellipse = np.column_stack([120.0 + 60.0 * np.cos(angles), 90.0 + 44.0 * np.sin(angles)])
+    outliers = np.array([[20.0, 20.0], [220.0, 20.0], [220.0, 170.0], [20.0, 170.0]])
+    points = np.vstack([ellipse, outliers]).astype(np.float32)
+
+    result = robust_ellipse_fit(points, DetectionConfig(ransac_iterations=400, seed=6), expected_radius=60)
+
+    assert result is not None
+    assert abs(result.center_x - 120.0) < 1.0
+    assert abs(result.center_y - 90.0) < 1.0
+    assert abs(result.major_radius - 60.0) < 1.5
+    assert abs(result.minor_radius - 44.0) < 1.5
+    assert abs(result.angle_deg) < 2.0
+    assert result.confidence > 0.9
 
 
 def test_adjusted_circle_confidence_rejects_high_residual_fit():

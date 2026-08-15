@@ -24,6 +24,14 @@ class FrameDetection:
     limb_support_fraction: float | None = None
     circle_residual_median_px: float | None = None
     circle_residual_p90_px: float | None = None
+    ellipse_center_x: float | None = None
+    ellipse_center_y: float | None = None
+    ellipse_major_radius: float | None = None
+    ellipse_minor_radius: float | None = None
+    ellipse_angle_deg: float | None = None
+    ellipse_residual_median_px: float | None = None
+    ellipse_residual_p90_px: float | None = None
+    ellipse_support_fraction: float | None = None
     segment_id: int = 0
     rotation_deg: float = 0.0
     rotation_confidence: float = 0.0

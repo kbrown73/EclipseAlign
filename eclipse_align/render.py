@@ -266,7 +266,48 @@ def circle_alpha_mask(
     return mask
 
 
-def add_circle_alpha(image: np.ndarray, detection: FrameDetection, crop: CropRect | None = None) -> np.ndarray:
+def ellipse_alpha_mask(
+    height: int,
+    width: int,
+    *,
+    center_x: float,
+    center_y: float,
+    major_radius: float | None,
+    minor_radius: float | None,
+    angle_deg: float | None,
+    dtype=np.float32,
+) -> np.ndarray:
+    mask = np.zeros((height, width, 1), dtype=dtype)
+    if (
+        major_radius is None
+        or minor_radius is None
+        or angle_deg is None
+        or not np.isfinite(major_radius)
+        or not np.isfinite(minor_radius)
+        or major_radius <= 0
+        or minor_radius <= 0
+    ):
+        return mask
+    yy, xx = np.ogrid[:height, :width]
+    angle = np.deg2rad(angle_deg)
+    cos_a = np.cos(angle)
+    sin_a = np.sin(angle)
+    dx = xx - center_x
+    dy = yy - center_y
+    major_coord = dx * cos_a + dy * sin_a
+    minor_coord = -dx * sin_a + dy * cos_a
+    normalized = (major_coord / major_radius) ** 2 + (minor_coord / minor_radius) ** 2
+    mask[:, :, 0] = (normalized <= 1.0).astype(dtype)
+    return mask
+
+
+def add_circle_alpha(
+    image: np.ndarray,
+    detection: FrameDetection,
+    crop: CropRect | None = None,
+    *,
+    rotation_deg: float = 0.0,
+) -> np.ndarray:
     if image.ndim == 2:
         image = image[:, :, np.newaxis]
     output = np.asarray(image)
@@ -279,14 +320,30 @@ def add_circle_alpha(image: np.ndarray, detection: FrameDetection, crop: CropRec
     else:
         center_x = source_center_x - crop.left
         center_y = source_center_y - crop.top
-    alpha = circle_alpha_mask(
-        output_height,
-        output_width,
-        center_x=center_x,
-        center_y=center_y,
-        radius=detection.radius,
-        dtype=output.dtype,
-    )
+    if (
+        detection.ellipse_major_radius is not None
+        and detection.ellipse_minor_radius is not None
+        and detection.ellipse_angle_deg is not None
+    ):
+        alpha = ellipse_alpha_mask(
+            output_height,
+            output_width,
+            center_x=center_x,
+            center_y=center_y,
+            major_radius=detection.ellipse_major_radius,
+            minor_radius=detection.ellipse_minor_radius,
+            angle_deg=detection.ellipse_angle_deg + rotation_deg,
+            dtype=output.dtype,
+        )
+    else:
+        alpha = circle_alpha_mask(
+            output_height,
+            output_width,
+            center_x=center_x,
+            center_y=center_y,
+            radius=detection.radius,
+            dtype=output.dtype,
+        )
     if output.shape[2] >= 4:
         output = output.copy()
         output[:, :, 3] = alpha[:, :, 0]
@@ -312,5 +369,6 @@ def render_frame(
     if crop is not None:
         aligned = crop_with_padding(aligned, crop)
     if add_alpha_circle:
-        aligned = add_circle_alpha(aligned, detection, crop)
+        alpha_rotation = detection.rotation_deg if apply_rotation and detection.rotation_confidence >= 0.6 else 0.0
+        aligned = add_circle_alpha(aligned, detection, crop, rotation_deg=alpha_rotation)
     write_exr(output_path, aligned)

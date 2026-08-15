@@ -189,10 +189,11 @@ Supported raw-fit override behavior:
 
 - `--prefer-plausible-raw`: prefer plausible raw fits globally after visual
   review.
-- `--plausible-raw-range START-END[,START-END...]`: prefer plausible raw fits
+- `--plausible-raw-range RANGE[,RANGE...]`: prefer plausible raw fits
   only in reviewed 1-based inclusive frame ranges. The option accepts
-  comma-separated range lists such as `1225-1300,3720-4461`, may be repeated,
-  and implies raw-fit preference for those ranges.
+  comma-separated range lists such as `1225-1300,2000-2100,3720+`, may be
+  repeated, and implies raw-fit preference for those ranges. `START+` means
+  from `START` through the final input frame.
 - Plausible raw fits still apply guardrails: raw center and raw radius must
   exist, raw radius must be reasonably close to the sequence common radius,
   confidence must be above a low floor, limb support must not be extremely poor,
@@ -220,11 +221,22 @@ visually better than interpolation for some frames, while nearby raw fits may
 lock onto the horizon, clouds, or the moon edge.
 
 This should remain a reviewed/manual workflow unless a stronger model is added.
+Supported horizon behavior:
+
+- `--horizon-ellipse-range RANGE[,RANGE...]`: fit and prefer guarded ellipse
+  centers only inside reviewed 1-based frame ranges. The option accepts
+  repeated comma-separated lists and `START+` open-ended ranges.
+- Accepted ellipse fits must be horizontally plausible, close to the refined
+  temporal track, close to the common radius on the major axis, and materially
+  improve the circle residual.
+- Accepted ellipse fits must be recorded in metadata with `horizon_ellipse_fit`
+  and ellipse quality fields.
+
 Future approaches could include:
 
 - A range-scoped "horizon mode" that relaxes common-radius checks and treats the
   raw center as a candidate instead of immediately preferring interpolation.
-- Ellipse or arc fitting for visibly flattened sunset disks.
+- Arc fitting for severely obstructed sunset disks.
 - Segment-local radius estimates rather than one global common radius.
 - Per-frame or range-based manual overrides for centers and alpha masks.
 - Diagnostics that graph raw/final center offsets, raw radius, confidence, and
@@ -306,6 +318,7 @@ Possible flags:
 - `interpolated`
 - `radius_constrained_redetect`
 - `raw_fit_override`
+- `horizon_ellipse_fit`
 - `manual_center_override`
 - `distorted_limb_suspected`
 
@@ -314,6 +327,17 @@ Metadata should also include circle-fit quality fields when available:
 - `limb_support_fraction`: fraction of detected limb points close to the fitted circle.
 - `circle_residual_median_px`: median absolute distance from detected limb points to the fitted circle.
 - `circle_residual_p90_px`: 90th percentile absolute distance from detected limb points to the fitted circle.
+
+Accepted horizon ellipse fits should include:
+
+- `ellipse_center_x`
+- `ellipse_center_y`
+- `ellipse_major_radius`
+- `ellipse_minor_radius`
+- `ellipse_angle_deg`
+- `ellipse_residual_median_px`
+- `ellipse_residual_p90_px`
+- `ellipse_support_fraction`
 
 ## Diagnostics
 

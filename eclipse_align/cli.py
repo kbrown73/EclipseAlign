@@ -17,7 +17,7 @@ import astroio
 from astroio.exr import write_exr as write_astroio_exr
 from tqdm import tqdm
 
-from .detect import DetectionConfig, detect_file
+from .detect import DetectionConfig, EllipseFit, detect_file, fit_horizon_ellipse_file
 from .diagnostics import write_overlay_preview
 from .dust import DustConfig, DustDetectionResult, analyze_dust_inputs
 from .files import discover_inputs
@@ -175,10 +175,20 @@ def add_detection_args(parser: argparse.ArgumentParser) -> None:
         "--plausible-raw-range",
         action="append",
         default=[],
-        metavar="START-END[,START-END...]",
+        metavar="RANGE[,RANGE...]",
         help=(
             "limit plausible raw fit overrides to comma-separated 1-based inclusive frame ranges; "
-            "may be repeated, e.g. 1225-1300,3720-4461"
+            "may be repeated, e.g. 1225-1300,2000-2100,3720+"
+        ),
+    )
+    parser.add_argument(
+        "--horizon-ellipse-range",
+        action="append",
+        default=[],
+        metavar="RANGE[,RANGE...]",
+        help=(
+            "fit and prefer guarded ellipse centers for reviewed horizon/distortion frame ranges; "
+            "uses 1-based inclusive frame numbers and may be repeated, e.g. 1225-1300,3720+"
         ),
     )
 
@@ -267,6 +277,11 @@ def parallel_run_unordered(fn, items, *, jobs: int, desc: str) -> None:
 def detect_worker(payload: tuple[str, DetectionConfig, float | None]) -> FrameDetection:
     path, config, expected_radius = payload
     return detect_file(path, config, expected_radius=expected_radius)
+
+
+def horizon_ellipse_worker(payload: tuple[str, DetectionConfig, float | None]) -> EllipseFit | None:
+    path, config, expected_radius = payload
+    return fit_horizon_ellipse_file(path, config, expected_radius=expected_radius)
 
 
 def preview_worker(payload: tuple[str, FrameDetection, DetectionConfig, str, int]) -> None:
@@ -366,14 +381,17 @@ PLAUSIBLE_RAW_MIN_SUPPORT = 0.35
 PLAUSIBLE_RAW_MAX_MEDIAN_RESIDUAL_PX = 50.0
 
 
-def parse_plausible_raw_ranges(values: list[str], frame_count: int) -> set[int]:
+def parse_frame_ranges(values: list[str], frame_count: int, option_name: str) -> set[int]:
     indexes: set[int] = set()
     for value in values:
         for part in value.split(","):
             token = part.strip()
             if not token:
                 continue
-            if "-" in token:
+            if token.endswith("+"):
+                start_text = token[:-1]
+                end_text = str(frame_count)
+            elif "-" in token:
                 start_text, end_text = token.split("-", 1)
             else:
                 start_text = token
@@ -382,13 +400,17 @@ def parse_plausible_raw_ranges(values: list[str], frame_count: int) -> set[int]:
                 start = int(start_text)
                 end = int(end_text)
             except ValueError as exc:
-                raise SystemExit(f"Invalid --plausible-raw-range value: {token}") from exc
+                raise SystemExit(f"Invalid {option_name} value: {token}") from exc
             if start < 1 or end < start or end > frame_count:
                 raise SystemExit(
-                    f"--plausible-raw-range must be within 1-{frame_count} and ordered: {token}"
+                    f"{option_name} must be within 1-{frame_count} and ordered: {token}"
                 )
             indexes.update(range(start - 1, end))
     return indexes
+
+
+def parse_plausible_raw_ranges(values: list[str], frame_count: int) -> set[int]:
+    return parse_frame_ranges(values, frame_count, "--plausible-raw-range")
 
 
 def plausible_raw_indexes(args: argparse.Namespace, frame_count: int) -> set[int]:
@@ -398,6 +420,10 @@ def plausible_raw_indexes(args: argparse.Namespace, frame_count: int) -> set[int
     if args.prefer_plausible_raw:
         return set(range(frame_count))
     return set()
+
+
+def horizon_ellipse_indexes(args: argparse.Namespace, frame_count: int) -> set[int]:
+    return parse_frame_ranges(args.horizon_ellipse_range, frame_count, "--horizon-ellipse-range")
 
 
 def is_plausible_raw_fit(detection: FrameDetection, common_radius: float | None) -> bool:
@@ -441,6 +467,99 @@ def apply_plausible_raw_overrides(
         if "raw_fit_override" not in detection.flags:
             detection.flags.append("raw_fit_override")
         applied += 1
+    if applied:
+        assign_translations(detections)
+    return applied
+
+
+HORIZON_ELLIPSE_RADIUS_TOLERANCE = 0.35
+HORIZON_ELLIPSE_MAX_CENTER_DRIFT_FRACTION = 0.35
+HORIZON_ELLIPSE_MAX_CENTER_DRIFT_PX = 90.0
+
+
+def ellipse_fit_improves_detection(
+    detection: FrameDetection,
+    ellipse: EllipseFit,
+    common_radius: float | None,
+    config: DetectionConfig,
+) -> bool:
+    if ellipse.residual_median_px > config.max_ellipse_median_residual_px:
+        return False
+    if ellipse.support_fraction < config.distorted_limb_support_fraction:
+        return False
+
+    reference_radius = common_radius if common_radius is not None else detection.radius
+    if reference_radius is not None:
+        radius_error = abs(ellipse.major_radius - reference_radius) / max(reference_radius, 1.0)
+        if radius_error > HORIZON_ELLIPSE_RADIUS_TOLERANCE:
+            return False
+
+    if detection.has_center:
+        center_drift = float(np.hypot(ellipse.center_x - detection.center_x, ellipse.center_y - detection.center_y))
+        if reference_radius is not None:
+            max_drift = min(
+                HORIZON_ELLIPSE_MAX_CENTER_DRIFT_PX,
+                max(24.0, reference_radius * HORIZON_ELLIPSE_MAX_CENTER_DRIFT_FRACTION),
+            )
+        else:
+            max_drift = HORIZON_ELLIPSE_MAX_CENTER_DRIFT_PX
+        if center_drift > max_drift:
+            return False
+
+    if detection.circle_residual_median_px is not None:
+        required = detection.circle_residual_median_px * (1.0 - config.min_ellipse_improvement)
+        if ellipse.residual_median_px >= required:
+            return False
+
+    return True
+
+
+def apply_horizon_ellipse_overrides(
+    inputs: list[Path],
+    detections: list[FrameDetection],
+    indexes: set[int],
+    config: DetectionConfig,
+    common_radius: float | None,
+    *,
+    jobs: int,
+) -> int:
+    if not indexes:
+        return 0
+
+    sorted_indexes = sorted(indexes)
+    fits = parallel_map_ordered(
+        horizon_ellipse_worker,
+        [(str(inputs[idx]), config, common_radius) for idx in sorted_indexes],
+        jobs=jobs,
+        desc="ellipse",
+    )
+
+    applied = 0
+    for idx, ellipse in zip(sorted_indexes, fits):
+        if ellipse is None:
+            continue
+        detection = detections[idx]
+        if not ellipse_fit_improves_detection(detection, ellipse, common_radius, config):
+            continue
+
+        detection.ellipse_center_x = ellipse.center_x
+        detection.ellipse_center_y = ellipse.center_y
+        detection.ellipse_major_radius = ellipse.major_radius
+        detection.ellipse_minor_radius = ellipse.minor_radius
+        detection.ellipse_angle_deg = ellipse.angle_deg
+        detection.ellipse_residual_median_px = ellipse.residual_median_px
+        detection.ellipse_residual_p90_px = ellipse.residual_p90_px
+        detection.ellipse_support_fraction = ellipse.support_fraction
+        detection.center_x = ellipse.center_x
+        detection.center_y = ellipse.center_y
+        detection.radius = ellipse.major_radius
+        detection.confidence = min(0.75, max(0.35, ellipse.confidence))
+        detection.status = "estimated"
+        detection.flags = [flag for flag in detection.flags if flag != "interpolated"]
+        if "horizon_ellipse_fit" not in detection.flags:
+            detection.flags.append("horizon_ellipse_fit")
+        applied += 1
+
     if applied:
         assign_translations(detections)
     return applied
@@ -759,6 +878,14 @@ def detect_command(args: argparse.Namespace) -> int:
         plausible_raw_indexes(args, len(detections)),
         common_radius,
     )
+    ellipse_overrides = apply_horizon_ellipse_overrides(
+        inputs,
+        detections,
+        horizon_ellipse_indexes(args, len(detections)),
+        config,
+        common_radius,
+        jobs=jobs,
+    )
     rotation_boundaries = []
     if args.detect_rotation:
         rotation_boundaries = estimate_rotations(
@@ -810,6 +937,8 @@ def detect_command(args: argparse.Namespace) -> int:
         print(f"Radius-constrained redetect improved {redetected} frames")
     if raw_overrides:
         print(f"Plausible raw fit overrides applied to {raw_overrides} frames")
+    if ellipse_overrides:
+        print(f"Horizon ellipse overrides applied to {ellipse_overrides} frames")
     if common_radius is not None:
         print(f"Common radius estimate: {common_radius:.2f}px")
     if dust_result is not None:
@@ -905,6 +1034,14 @@ def process_command(args: argparse.Namespace) -> int:
         plausible_raw_indexes(args, len(detections)),
         common_radius,
     )
+    ellipse_overrides = apply_horizon_ellipse_overrides(
+        inputs,
+        detections,
+        horizon_ellipse_indexes(args, len(detections)),
+        config,
+        common_radius,
+        jobs=jobs,
+    )
     rotation_boundaries = []
     if args.detect_rotation:
         rotation_boundaries = estimate_rotations(
@@ -968,6 +1105,8 @@ def process_command(args: argparse.Namespace) -> int:
         print(f"Radius-constrained redetect improved {redetected} frames")
     if raw_overrides:
         print(f"Plausible raw fit overrides applied to {raw_overrides} frames")
+    if ellipse_overrides:
+        print(f"Horizon ellipse overrides applied to {ellipse_overrides} frames")
     print(f"Rendered {rendered} frames to {output_dir}")
     if args.polish_alignment:
         print(f"Polished {polished} frames")
