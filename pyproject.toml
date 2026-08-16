@@ -6,7 +6,26 @@ build-backend = "setuptools.build_meta"
 name = "eclipse-align"
 version = "0.1.0"
 description = "Align OpenEXR solar eclipse timelapse frames."
+readme = "README.md"
 requires-python = ">=3.12"
+dependencies = [
+    "av",
+    "numpy",
+    "opencv-python",
+    "OpenImageIO",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
+[project.scripts]
+eclipse-align = "eclipse_align.cli:main"
+
+[tool.setuptools]
+packages = ["eclipse_align", "astroio"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
