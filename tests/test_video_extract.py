@@ -10,6 +10,7 @@ from eclipse_align.cli import (
     exr_half_for_video_frame,
     extract_video_frames,
     normalize_video_inputs,
+    normalize_per_video_option,
     srgb_to_linear,
     video_frame_to_exr_float,
     video_frame_filename,
@@ -134,6 +135,60 @@ def test_extract_video_frames_concatenates_multiple_inputs(tmp_path):
         "frame_0004.exr",
         "frame_0005.exr",
     ]
+
+
+def test_extract_video_frames_applies_debayer_and_transfer_per_input(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeReader:
+        frame_count = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def __iter__(self):
+            yield np.zeros((2, 2, 3), dtype=np.uint8)
+
+    def fake_open_reader(path, *, output_format, debayer):
+        calls.append(("reader", path.name, output_format, debayer))
+        return FakeReader()
+
+    def fake_video_frame_to_exr_float(frame, *, transfer):
+        calls.append(("transfer", transfer))
+        return frame.astype(np.float32)
+
+    monkeypatch.setattr("eclipse_align.cli.astroio.open_reader", fake_open_reader)
+    monkeypatch.setattr("eclipse_align.cli.video_frame_to_exr_float", fake_video_frame_to_exr_float)
+    monkeypatch.setattr("eclipse_align.cli.write_astroio_exr", lambda *args, **kwargs: None)
+
+    count = extract_video_frames(
+        [tmp_path / "rgb.mp4", tmp_path / "raw.avi"],
+        tmp_path / "frames",
+        debayer=["none", "GRBG"],
+        transfer=["srgb", "none"],
+        digits=4,
+    )
+
+    assert count == 2
+    assert calls == [
+        ("reader", "rgb.mp4", "auto", "none"),
+        ("transfer", "srgb"),
+        ("reader", "raw.avi", "auto", "GRBG"),
+        ("transfer", "none"),
+    ]
+
+
+def test_normalize_per_video_option_broadcasts_single_value():
+    assert normalize_per_video_option("debayer", ["none"], 3) == ["none", "none", "none"]
+    assert normalize_per_video_option("transfer", "srgb", 2) == ["srgb", "srgb"]
+
+
+def test_normalize_per_video_option_requires_one_value_or_one_per_input():
+    with pytest.raises(ValueError, match="--debayer expects either one value or 3 values"):
+        normalize_per_video_option("debayer", ["none", "GRBG"], 3)
 
 
 def test_normalize_video_inputs_preserves_repeat_and_argument_order():

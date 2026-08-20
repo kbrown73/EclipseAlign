@@ -68,7 +68,7 @@ video to EXR frames first, then run the normal EXR workflow:
 
 For one event split across multiple video files, pass the files in the order you
 want them decoded. `--input` may be repeated, or one `--input` may be followed
-by multiple paths:
+by multiple paths. Frame numbering continues across all input videos:
 
 ```bash
 /usr/bin/python3 -m eclipse_align extract-video \
@@ -82,6 +82,23 @@ by multiple paths:
   --output extracted_frames \
   --debayer none
 ```
+
+If the videos need different decode settings, pass one `--debayer` or
+`--transfer` value per input video. For example, an event that starts as normal
+RGB video and continues as raw Bayer AVI can be extracted in one continuous EXR
+sequence like this:
+
+```bash
+/usr/bin/python3 -m eclipse_align extract-video \
+  --input "path/to/start-rgb.mp4" "path/to/finish-raw.avi" \
+  --output extracted_frames \
+  --debayer none GRBG \
+  --transfer srgb none
+```
+
+A single `--debayer` or `--transfer` value applies to every input video. When
+multiple values are supplied, the number of values must match the number of
+input videos.
 
 By default, AstroIO chooses the decoded video precision automatically: 8-bit
 sources are decoded as `rgb24`, while higher bit-depth sources are decoded as

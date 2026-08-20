@@ -109,8 +109,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     extract_video.add_argument(
         "--debayer",
-        default="auto",
-        help="debayer raw Bayer video frames: auto, none, RGGB, BGGR, GBRG, or GRBG",
+        nargs="+",
+        default=["auto"],
+        help=(
+            "debayer raw Bayer video frames: auto, none, RGGB, BGGR, GBRG, or GRBG; "
+            "pass one value for all inputs or one value per input video"
+        ),
     )
     extract_video.add_argument(
         "--exr-pixel-type",
@@ -120,9 +124,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     extract_video.add_argument(
         "--transfer",
+        nargs="+",
         choices=("srgb", "none"),
-        default="srgb",
-        help="transfer conversion before writing EXR; srgb converts display RGB to linear values",
+        default=["srgb"],
+        help=(
+            "transfer conversion before writing EXR; pass one value for all inputs or one value per input video"
+        ),
     )
     extract_video.add_argument("--digits", type=int, default=6, help="frame number digits for output filenames")
 
@@ -693,30 +700,43 @@ def normalize_video_inputs(input_paths: str | Path | Iterable[str | Path | Itera
     return paths
 
 
+def normalize_per_video_option(option_name: str, value: str | Iterable[str], input_count: int) -> list[str]:
+    values = [value] if isinstance(value, str) else list(value)
+    if len(values) == 1:
+        return values * input_count
+    if len(values) == input_count:
+        return values
+    raise ValueError(
+        f"--{option_name} expects either one value or {input_count} values for the input videos; got {len(values)}"
+    )
+
+
 def extract_video_frames(
     input_path: str | Path | Iterable[str | Path | Iterable[str | Path]],
     output_dir: str | Path,
     *,
     output_format: str = "auto",
-    debayer: str = "auto",
+    debayer: str | Iterable[str] = "auto",
     exr_pixel_type: str = "auto",
-    transfer: str = "srgb",
+    transfer: str | Iterable[str] = "srgb",
     digits: int = 6,
 ) -> int:
     input_paths = normalize_video_inputs(input_path)
+    debayer_values = normalize_per_video_option("debayer", debayer, len(input_paths))
+    transfer_values = normalize_per_video_option("transfer", transfer, len(input_paths))
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     frame_number = 1
     total_count = 0
-    for path in input_paths:
+    for path, debayer_value, transfer_value in zip(input_paths, debayer_values, transfer_values):
         desc = "extract-video" if len(input_paths) == 1 else f"extract-video {path.name}"
-        with astroio.open_reader(path, output_format=output_format, debayer=debayer) as reader:
+        with astroio.open_reader(path, output_format=output_format, debayer=debayer_value) as reader:
             written = 0
             for frame in tqdm(reader, total=reader.frame_count, desc=desc):
                 output_path = output_dir / video_frame_filename(frame_number, digits=digits)
                 write_astroio_exr(
                     output_path,
-                    video_frame_to_exr_float(frame, transfer=transfer),
+                    video_frame_to_exr_float(frame, transfer=transfer_value),
                     half=exr_half_for_video_frame(frame, exr_pixel_type),
                 )
                 frame_number += 1
@@ -1227,7 +1247,7 @@ def extract_video_command(args: argparse.Namespace) -> int:
             transfer=args.transfer,
             digits=args.digits,
         )
-    except astroio.UnsupportedPixelFormatError as exc:
+    except (astroio.UnsupportedPixelFormatError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     print(f"Extracted {count} frames to {Path(args.output)}")
     return 0
